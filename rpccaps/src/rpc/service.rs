@@ -8,6 +8,10 @@ use super::codec::BincodeCodec;
 use super::message::{Message,Error};
 use super::transport::Transport;
 
+// TODO:
+// - service_derive:
+//      - #[rpc(is_alive)] => use this method as is_alive result
+//      - request timeout
 
 /// Generic Service trait that handling requests and call corresponding RPC method.
 #[async_trait]
@@ -23,15 +27,16 @@ pub trait Service: Send+Sync+Unpin {
 
     /// Serve using provided transport
     async fn serve<T,E>(&mut self, mut transport: T)
-        where T: Stream<Item=ServiceMessage<Self>>+Sink<ServiceMessage<Self>,Error=E>+Unpin+Send,
+        where T: Stream<Item=Result<ServiceMessage<Self>,E>>+Sink<ServiceMessage<Self>,Error=E>+Unpin+Send,
               E: Unpin+Send
     {
         while let (Some(msg), true) = (transport.next().await, self.is_alive()) {
             match msg {
-                Message::Request(req) => match self.dispatch(req).await {
+                Ok(Message::Request(req)) => match self.dispatch(req).await {
                     Some(resp) => { transport.send(Message::Response(resp)).await; },
                     _ => (),
                 }
+                Err(_) => { transport.send(Message::Error(Error::Format)).await; break; }
                 _ => (),
             }
         }
@@ -43,21 +48,12 @@ pub trait Service: Send+Sync+Unpin {
     {
         let codec = BincodeCodec::<ServiceMessage<Self>>::new();
         let mut transport = Framed::new(Transport::new(send_stream, recv_stream), codec);
-        while let (Some(msg), true) = (transport.next().await, self.is_alive()) {
-            match msg {
-                Ok(Message::Request(req)) => match self.dispatch(req).await {
-                    Some(resp) => { transport.send(Message::Response(resp)).await; },
-                    _ => (),
-                }
-                Err(_) => { transport.send(Message::Error(Error::Format)).await; break; },
-                _ => (),
-            }
-        }
+        self.serve(transport);
     }
 }
 
 /// Message type for a provided Service.
-type ServiceMessage<S> = Message<<S as Service>::Request, <S as Service>::Response>;
+pub type ServiceMessage<S> = Message<<S as Service>::Request, <S as Service>::Response>;
 
 
 #[cfg(test)]
@@ -101,6 +97,9 @@ mod test {
         }
     }
 
+    use rpccaps::rpc::Transport;
+    use futures::stream::StreamExt;
+
     #[test]
     fn test_request_response() {
         let (client_transport, server_transport) = MPSCTransport::<service::Message, service::Message>::bi(8);
@@ -114,8 +113,10 @@ mod test {
         };
 
         let server_fut = async move {
+            let (s,r) = server_transport.split();
+            let transport = Transport::new(s,r.then(|x| async { Ok(x) }).boxed());
             let mut service = SimpleService::new();
-            service.serve(server_transport).await;
+            service.serve(transport).await;
         };
 
         LocalPool::new().run_until(join(client_fut, server_fut));

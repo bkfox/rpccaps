@@ -81,7 +81,6 @@ impl<I,S,R> Sink<I> for Transport<S,R>
     }
 }
 
-
 impl<S,R> Stream for Transport<S,R>
     where R: Stream+Unpin, S: Unpin
 {
