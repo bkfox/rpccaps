@@ -1,0 +1,36 @@
+[package]
+name = "rpccaps"
+version = "0.1.0"
+authors = ["bkfox <thomas bkfox net>"]
+edition = "2018"
+description = "Capabilities based rpc system."
+
+[features]
+default = ["network"]
+network = ["quinn"]
+plugins = []
+
+[dependencies]
+rpccaps_derive = { path = "../rpccaps_derive" }
+
+async-bincode = "0.5.1"
+bincode="1.3"
+bytes = "0.6.0"
+byteorder = "1.3.4"
+serde= { version="1.0", features=["derive"] }
+uuid = { version = "0.8", features = ["serde", "v5"] }
+
+signature="1.0"
+signatory={ version="0.21", features=["ed25519"] }
+signatory-dalek="0.20"
+signatory-sodiumoxide="0.21"
+ed25519="1.0"
+
+futures="0.3"
+futures-util = "0.3"
+async-trait = "0.1.41"
+tokio= { version="0.3", features=["io-util"] }
+tokio-util = { version="0.5.0", features=["codec"] }
+
+quinn = { version = "0.6.1", optional = true }
+
