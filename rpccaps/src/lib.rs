@@ -4,6 +4,7 @@
 
 pub mod data;
 pub mod rpc;
+pub mod services;
 
 
 pub mod tests {

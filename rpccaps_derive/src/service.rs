@@ -3,12 +3,13 @@ extern crate proc_macro;
 use syn;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use quote::{quote,ToTokens};
 
 use super::utils::*;
 
 
 struct Method {
+    index: u32,
     ident: syn::Ident,
     ident_cap: syn::Ident,
     args: Vec<syn::Pat>,
@@ -19,7 +20,7 @@ struct Method {
 }
 
 impl Method {
-    fn new(method: &mut syn::ImplItemMethod) -> Option<Self> {
+    fn new(index: u32, method: &mut syn::ImplItemMethod) -> Option<Self> {
         let sig = &method.sig;
         // arguments
         let mut iter = sig.inputs.iter();
@@ -29,12 +30,12 @@ impl Method {
         }
 
         let (mut args, mut args_ty) = (Vec::new(), Vec::new());
-        for arg in sig.inputs.iter() {
+        for arg in iter {
             match arg {
                 syn::FnArg::Typed(arg) => {
                     args.push((*arg.pat).clone());
                     args_ty.push((*arg.ty).clone());
-                },
+                }
                 _ => (),
             }
         }
@@ -43,7 +44,7 @@ impl Method {
         // let attrs = Attributes::from_attrs("rpc", &mut method.attrs).to_map();
 
         let ident = sig.ident.clone();
-        Some(Self { args, args_ty, ident,
+        Some(Self { index, args, args_ty, ident,
             ident_cap: to_camel_ident(&sig.ident),
             output: match sig.output.clone() {
                 syn::ReturnType::Default => None,
@@ -54,30 +55,17 @@ impl Method {
         })
     }
 
-    fn render_request_variant(&self) -> TokenStream2 {
-        let Self { ident_cap, args_ty, .. } = self;
-        quote! { #ident_cap(#(#args_ty),*) }
-    }
-
-    fn render_response_variant(&self) -> TokenStream2 {
-        let Self { ident_cap, output, .. } = self;
-        match output {
-            Some(output) => quote! { #ident_cap(#output) },
-            None => quote! { #ident_cap },
-        }
-    }
-
-    fn render_dispatch_variant(&self) -> TokenStream2 {
-        let call = self.render_dispatch_call();
+    fn get_dispatch_variant(&self) -> TokenStream2 {
+        let call = self.get_dispatch_call();
         let Self { ident_cap, args, .. } = self;
         quote! { Request::#ident_cap(#(#args),*) => { #call } }
     }
 
-    fn render_dispatch_call(&self) -> TokenStream2 {
-        let Self { ident_cap, ident, args, .. } = self;
-        let invoke = match self.is_async {
+    fn get_dispatch_call(&self) -> TokenStream2 {
+        let Self { ident_cap, ident, args, is_async, .. } = self;
+        let invoke = match is_async {
+            false => quote! { self.#ident(#(#args),*) },
             true => quote! { self.#ident(#(#args),*).await },
-            false => quote! { self.#ident(#(#args),*) }
         };
 
         match self.output {
@@ -86,7 +74,7 @@ impl Method {
         }
     }
 
-    fn render_client_method(&self) -> TokenStream2 {
+    fn get_client_method(&self) -> TokenStream2 {
         let Self { ident, ident_cap, args, args_ty, .. } = self;
         match &self.output {
             None => quote! {
@@ -94,12 +82,14 @@ impl Method {
                     self.transport.send(Message::Request(Request::#ident_cap(#(#args),*))).await;
                 }
             },
-            Some(out) => quote! {
-                pub async fn #ident(&mut self, #(#args: #args_ty),*) -> Result<#out,()> {
-                    self.transport.send(Message::Request(Request::#ident_cap(#(#args),*))).await;
-                    match self.transport.next().await {
-                        Some(Message::Response(Response::#ident_cap(out))) => Ok(out),
-                        _ => Err(()),
+            Some(out) => {
+                quote! {
+                    pub async fn #ident(&mut self, #(#args: #args_ty),*) -> Result<#out,()> {
+                        self.transport.send(Message::Request(Request::#ident_cap(#(#args),*))).await;
+                        match self.transport.next().await {
+                            Some(Message::Response(Response::#ident_cap(out))) => Ok(out),
+                            _ => Err(()),
+                        }
                     }
                 }
             }
@@ -111,16 +101,21 @@ impl Method {
 struct Service<'a> {
     ast: &'a mut syn::ItemImpl,
     methods: Vec<Method>,
+    meta: Attributes,
 }
 
 impl<'a> Service<'a> {
     pub fn new(ast: &'a mut syn::ItemImpl) -> Self {
-        let methods = ast.items.iter_mut().filter_map(|mut item| match &mut item {
-            syn::ImplItem::Method(ref mut method) => Method::new(method),
-            _ => None
-        }).collect();
+        let methods = ast.items.iter_mut().enumerate()
+            .filter_map(|(index, mut item)| match &mut item {
+                syn::ImplItem::Method(ref mut method) => Method::new(index as u32, method),
+                _ => None
+            }).collect::<Vec<_>>();
 
-        Self { ast, methods }
+        assert!(methods.len() <= 64, "a maximum 64 rpc methods is allowed");
+
+        let mut meta = Attributes::from_attrs("service", &mut ast.attrs);
+        Self { ast, methods, meta }
     }
 
     pub fn generate(&self) -> TokenStream {
@@ -139,7 +134,9 @@ impl<'a> Service<'a> {
                 use async_trait::async_trait;
                 use serde::{Deserialize,Serialize};
 
+                use rpccaps::data::Capability;
                 use rpccaps::rpc::service::{Service,ServiceMessage};
+                use rpccaps::data::{signature as sig};
 
                 #types
                 #server
@@ -150,9 +147,22 @@ impl<'a> Service<'a> {
 
     fn types(&self) -> TokenStream2 {
         let ty = &*self.ast.self_ty;
-        let (_impl_generics, ty_generics, where_clause) = self.ast.generics.split_for_impl();
-        let requests = self.methods.iter().map(|m| m.render_request_variant());
-        let responses = self.methods.iter().map(|m| m.render_response_variant());
+        let (impl_generics, ty_generics, where_clause) = self.ast.generics.split_for_impl();
+
+        let requests = self.methods.iter().map(|Method { ident_cap, args_ty, .. }| {
+            quote! { #ident_cap(#(#args_ty),*) }
+        });
+        let responses = self.methods.iter().map(|Method { ident_cap, output, .. }| {
+            match output {
+                Some(output) => quote! { #ident_cap(#output) },
+                None => quote! { #ident_cap },
+            }
+        });
+        /*let cap_ops = self.methods.iter().map(|Method { ident_cap, index, args_ty, .. }| {
+            let args_ty = args_ty.iter().map(|_| quote!{ _ });
+            let ops = 1u64.rotate_left(*index);
+            quote!{ Request::#ident_cap(#(#args_ty),*) => Capability::new(#ops, 0u64) }
+        });*/
 
         // we need phantom variant for handling generics cases: R, R<A>, R<A,B>.
         let phantom = quote! { _Phantom(PhantomData<Request #ty_generics>) };
@@ -172,13 +182,24 @@ impl<'a> Service<'a> {
 
             pub type Message = ServiceMessage<#ty>;
         }
+            /*
+            impl #impl_generics Into<Capability> for &Request #ty_generics #where_clause {
+                /// Get the index of the Request method.
+                fn into(self) -> Capability {
+                    match self {
+                        #(#cap_ops,)*
+                        _ => Capability::empty(),
+                    }
+                }
+            }
+        }*/
     }
 
     fn server(&self) -> TokenStream2 {
         let ty = &*self.ast.self_ty;
         let (impl_generics, ty_generics, where_clause) = self.ast.generics.split_for_impl();
 
-        let variants = self.methods.iter().map(|method| method.render_dispatch_variant());
+        let variants = self.methods.iter().map(|method| method.get_dispatch_variant());
         quote! {
             #[async_trait]
             impl #impl_generics Service for #ty #ty_generics #where_clause {
@@ -207,7 +228,7 @@ impl<'a> Service<'a> {
         )).unwrap());
 
         let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-        let methods = self.methods.iter().map(|m| m.render_client_method());
+        let methods = self.methods.iter().map(|m| m.get_client_method());
 
         quote! {
             pub struct Client #impl_generics #where_clause {

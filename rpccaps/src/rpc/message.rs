@@ -34,21 +34,21 @@ impl<Req,Resp,Er> Message<Req,Resp,Er>
           Resp: Send+Sync+Unpin,
           Er: Send+Sync+Unpin
 {
-    fn is_request(&self) -> bool {
+    pub fn is_request(&self) -> bool {
         match self {
             Message::Request(_) => true,
             _ => false
         }
     }
 
-    fn is_response(&self) -> bool {
+    pub fn is_response(&self) -> bool {
         match self {
             Message::Response(_) => true,
             _ => false
         }
     }
 
-    fn is_error(&self) -> bool {
+    pub fn is_error(&self) -> bool {
         match self {
             Message::Error(_) => true,
             _ => false

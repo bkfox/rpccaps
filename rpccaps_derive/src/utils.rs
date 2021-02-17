@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::iter::FromIterator;
+use std::ops::{Deref,DerefMut};
 
 use quote::ToTokens;
 use syn;
@@ -41,6 +42,9 @@ pub fn drain_attrs(attrs: &mut Vec<syn::Attribute>, mut func: impl FnMut(&syn::A
 }
 
 
+pub type AttributesMap = BTreeMap<String, Option<String>>;
+
+
 /// Read syn::Attribute list into key-values.
 ///
 /// Attribute accepted format:
@@ -49,20 +53,40 @@ pub fn drain_attrs(attrs: &mut Vec<syn::Attribute>, mut func: impl FnMut(&syn::A
 /// - #[prefix(key)]
 ///
 pub struct Attributes {
-    pub items: Vec<(String, Option<String>)>,
+    pub attrs: AttributesMap,
 }
 
 impl Attributes {
     pub fn new() -> Self {
-        Self { items: Vec::new() }
+        Self { attrs: AttributesMap::new() }
     }
 
+    /// Set `default` value for attribute key when not declared or None.
+    pub fn set_default<K: Into<String>, D: Into<String>>(&mut self, key: K, default: D) -> String {
+        let key = key.into();
+        if let Some(Some(v)) = self.attrs.get(&key) {
+            return v.clone();
+        }
+        self.attrs.insert(key.clone(), Some(default.into()));
+        self.attrs.get(&key).unwrap().as_ref().unwrap().clone()
+    }
+
+    /// Parse attribute into syn entity.
+    pub fn get_as<K: Into<String>,T: syn::parse::Parse>(&self, key: K) -> Option<T> {
+        match self.attrs.get(&key.into()) {
+            Some(Some(v)) => syn::parse_str(&v).ok(),
+            _ => None
+        }
+    }
+
+    /// Create new Attributes reading from provided `syn::Attribute`s
     pub fn from_attrs(prefix: &str, attrs: &mut Vec<syn::Attribute>) -> Self {
         let mut this = Self::new();
         this.read_attrs(prefix, attrs);
         this
     }
 
+    /// Read attributes draining them when attribute has provided prefix.
     pub fn read_attrs(&mut self, prefix: &str, attrs: &mut Vec<syn::Attribute>) {
         drain_attrs(attrs, |attr| {
             if !attr.path.is_ident(prefix) {
@@ -72,7 +96,7 @@ impl Attributes {
             match attr.parse_meta() {
                 Ok(syn::Meta::List(meta)) => {
                     for nested in meta.nested.iter() {
-                        self.push_nested(nested)
+                        self.insert_nested(nested)
                     }
                     true
                 },
@@ -81,14 +105,15 @@ impl Attributes {
         })
     }
 
-    fn push_nested(&mut self, meta: &syn::NestedMeta) {
+    /// Add attribute from `syn::NestedMeta`.
+    fn insert_nested(&mut self, meta: &syn::NestedMeta) {
         match meta {
             syn::NestedMeta::Meta(syn::Meta::Path(path)) => {
                 let key = match path.get_ident() {
                     Some(ident) => ident.to_string(),
                     _ => return,
                 };
-                self.push(key, None);
+                self.insert(key, None);
             },
             syn::NestedMeta::Meta(syn::Meta::NameValue(m)) => {
                 let key = match m.path.get_ident() {
@@ -100,22 +125,27 @@ impl Attributes {
                     _ => m.lit.to_token_stream().to_string(),
                 };
 
-                self.push(key, Some(value));
+                self.insert(key, Some(value));
             },
-            syn::NestedMeta::Lit(m) => self.push(m.to_token_stream().to_string(), None),
+            syn::NestedMeta::Lit(m) => {
+                self.insert(m.to_token_stream().to_string(), None); },
             _ => (),
         }
     }
+}
 
-    /// Add metadata from Expr.
-    pub fn push(&mut self, key: String, value: Option<String>) {
-        self.items.push((key, value));
-    }
 
-    /// Return a map of key values from items
-    pub fn to_map(self) -> BTreeMap<String, Option<String>> {
-        BTreeMap::from_iter(self.items.into_iter())
+impl Deref for Attributes {
+    type Target = AttributesMap;
+
+    fn deref(&self) -> &Self::Target {
+        &self.attrs
     }
 }
 
+impl DerefMut for Attributes {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.attrs
+    }
+}
 

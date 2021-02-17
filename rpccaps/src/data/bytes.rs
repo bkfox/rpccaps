@@ -1,5 +1,5 @@
-//! Provide serialize/deserialize methods for types that contains only a plain
-//! data array.
+//! Provide serialize/deserialize methods for types containing bytes array.
+//! This module is used for cryptographic serialization.
 use std::{mem,fmt};
 use std::marker::PhantomData;
 use serde::{Serializer,Deserializer,de};
@@ -40,7 +40,19 @@ pub fn deserialize<'de,D,T>(de: D) -> Result<T, D::Error>
     de.deserialize_bytes(BytesVisitor::<T>(PhantomData))
 }
 
-// Implement Bytes for Option<Bytes>
+
+/// Implement Bytes for Box<Bytes>
+impl<T: Bytes> Bytes for Box<T> {
+    fn from_bytes<B: AsRef<[u8]>>(b: B) -> Option<Self> {
+        T::from_bytes(b).and_then(|t| Some(Box::new(t)))
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.as_ref().as_bytes()
+    }
+}
+
+/// Implement Bytes for Option<Bytes>
 impl<T: Bytes> Bytes for Option<T> {
     fn from_bytes<B: AsRef<[u8]>>(b: B) -> Option<Self> {
         T::from_bytes(b).and_then(|t| Some(Some(t)))

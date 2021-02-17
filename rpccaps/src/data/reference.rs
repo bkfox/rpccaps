@@ -1,10 +1,11 @@
-use std::{mem,fmt};
+use std::fmt;
+use std::marker::PhantomData;
 
 use bincode;
 use serde::{Serialize,Deserialize};
 use signature::{Signer,Verifier};
 
-use super::bytes;
+use super::bytes::{self as bytes};
 use super::validate::Validate;
 use super::capability::Capability;
 use super::signature as sign;
@@ -12,10 +13,9 @@ use super::signature as sign;
 
 #[derive(Debug)]
 pub enum Error {
-    Data, Issuer, Subject,
-    Signature(usize, sign::Error),
-    Capability(usize),
-    MissingSignature(usize),
+    Empty, Capability, Issuer, Subject,
+    Serialize(bincode::Error),
+    Signature(sign::Error),
 }
 
 impl fmt::Display for Error {
@@ -26,117 +26,134 @@ impl fmt::Display for Error {
 
 
 
-/// A reference to an object with capabilities.
-#[derive(PartialEq)]
+/// A Reference is the combination of an object reference (as id) and authorizations chain.
+///
+/// It implements various utilities to sign and validate it.
+#[derive(Serialize,Deserialize,PartialEq,Clone)]
 pub struct Reference<Id,M>
-    where Id: Clone+Serialize, M: sign::Method
+    where Id: Clone+Serialize
 {
-    header: Header<Id,M::PublicKey>,
-    auths: Vec<Authorization<M::PublicKey,M::Signature>>,
-}
-
-/// Reference header
-#[derive(Serialize,Deserialize,PartialEq,Clone)]
-pub struct Header<Id,Pub>
-    where Id: Clone+Serialize, Pub: sign::PublicKey
-{
-    pub id: Id,
+    id: Id,
     #[serde(with="bytes")]
-    pub issuer: Pub,
+    issuer: sign::PublicKey,
+    certs: Vec<Certificate>,
+    phantom: PhantomData<M>,
 }
 
+
 #[derive(Serialize,Deserialize,PartialEq,Clone)]
-pub struct Authorization<Pub,Sig>
-    where Pub: sign::PublicKey, Sig: sign::Signature
+pub struct Certificate {
+    pub auth: Authorization,
+    #[serde(with="bytes")]
+    pub signature: sign::Signature,
+}
+
+
+#[derive(Serialize,Deserialize,PartialEq,Clone)]
+pub struct Authorization
 {
     pub capability: Capability,
     #[serde(with="bytes")]
-    pub subject: Pub,
-    #[serde(with="bytes")]
-    pub signature: Option<Sig>,
+    pub subject: sign::PublicKey,
+}
+
+
+#[derive(Serialize,Deserialize,PartialEq,Clone)]
+pub enum CertData<Id> {
+    Reference(Authorization, Id, #[serde(with="bytes")] sign::PublicKey),
+    Signature(Authorization, #[serde(with="bytes")] sign::Signature),
 }
 
 
 impl<Id,M> Reference<Id,M>
-    where Id: Clone+Serialize, M: sign::Method
+    where Id: Clone+Serialize, M: sign::SignMethod
 {
-    /// Create a new object reference, signing it with the provided keys.
-    pub fn new(signer: &M::Signer, id: Id, auth: Authorization<M::PublicKey,M::Signature>) -> Result<Self,Error>
+    /// Create a new reference, signing it with the provided keys.
+    pub fn new(signer: &M::Signer, id: Id, auth: Authorization) -> Result<Self,Error>
     {
         match M::public_key(signer) {
             Some(issuer) => {
-                let mut reference = Self { header: Header { id, issuer },
-                                           auths: Vec::with_capacity(1) };
+                let mut reference = Self { id, issuer, certs: Vec::with_capacity(1),
+                                           phantom: PhantomData };
                 reference.sign(signer, auth).and(Ok(reference))
             },
             _ => Err(Error::Issuer),
         }
     }
 
-    /// Add a new signature to the reference.
-    pub fn sign(&mut self, signer: &M::Signer, mut auth: Authorization<M::PublicKey,M::Signature>) -> Result<(), Error> {
-        match self.auths.last() {
-            Some(last) if M::public_key(&signer).unwrap() != last.subject
-                => return Err(Error::Issuer),
-            Some(last) if !auth.capability.is_subset(&last.capability)
-                => return Err(Error::Capability(self.auths.len())),
-            // None => return Err(Error::Data),
-            _ => (),
-        };
+    /// Return id of the reference.
+    pub fn id(&self) -> &Id {
+        &self.id
+    }
 
-        let mut buf = self.sign_buf();
-        for auth in self.auths.iter() {
-            bincode::serialize_into(&mut buf, &auth);
+    /// Return issuer of the reference.
+    pub fn issuer(&self) -> &sign::PublicKey {
+        &self.issuer
+    }
+
+    /// Return authorizations of the reference.
+    pub fn certs(&self) -> &Vec<Certificate> {
+        &self.certs
+    }
+
+    /// Return cert data for provided signer, authorization and last
+    /// certificate. Return Error on data validation fails.
+    fn cert_data(&self, issuer: &sign::PublicKey, auth: Authorization,
+                 last: Option<&Certificate>)
+        -> Result<CertData<Id>,Error>
+    {
+        match last {
+            None => Ok(CertData::Reference(auth, self.id.clone(), self.issuer)),
+            Some(last) => {
+                // test: auth must be subset of last auth
+                if !auth.capability.is_subset(&last.auth.capability) {
+                    return Err(Error::Capability);
+                }
+                // test: issuer must be last certificate's subject
+                if issuer != &last.auth.subject {
+                    return Err(Error::Issuer);
+                }
+                Ok(CertData::Signature(auth, last.signature))
+            }
         }
-
-        auth.serialize_data(&mut buf);
-        signer.try_sign(&buf).and_then(|signature| {
-            auth.signature = Some(signature);
-            self.auths.push(auth);
-            Ok(())
-        }).or_else(|err| {
-            Err(Error::Signature(self.auths.len(), err))
-        })
     }
 
-    // New buffer for signing, already including reference's header.
-    fn sign_buf(&self) -> Vec<u8> {
-        let size = mem::size_of_val(&self.header) +
-                   mem::size_of::<Authorization<M::PublicKey,M::Signature>>()
-                     * (self.auths.len()+1);
-        let mut buf = Vec::with_capacity(size);
-        bincode::serialize_into(&mut buf, &self.header);
-        buf
+    /// Add a new signature to the reference.
+    pub fn sign(&mut self, signer: &M::Signer, auth: Authorization) -> Result<(), Error> {
+        let cert_data = self.cert_data(&M::public_key(&signer).unwrap(), auth.clone(),
+                                       self.certs.last());
+        match cert_data {
+            Ok(cert_data) => bincode::serialize(&cert_data)
+                .or_else(|err| Err(Error::Serialize(err)))
+                .and_then(|buf| signer.try_sign(&buf)
+                                      .or_else(|err| Err(Error::Signature(err))))
+                .and_then(|signature| {
+                    self.certs.push(Certificate { auth, signature });
+                    Ok(())
+                }),
+            Err(err) => Err(err),
+        }
     }
 
-    /// Return reference header.
-    pub fn header(&self) -> &Header<Id,M::PublicKey> {
-        &self.header
-    }
-
-    /// Return signed authorizations of the reference.
-    pub fn auths(&self) -> &Vec<Authorization<M::PublicKey,M::Signature>> {
-        &self.auths
-    }
-
-    /// Create a subset from this reference, including authorizations until provided
-    /// subject.
-    pub fn subset(&self, subject: &M::PublicKey) -> Option<Self> {
-        self.auths.iter().enumerate().find(|(_i,a)| subject == &a.subject)
+    /// Create a new reference with authorizations' chain up to subject.
+    pub fn subset(&self, subject: &sign::PublicKey) -> Option<Self> {
+        self.certs.iter().enumerate().find(|(_i,c)| subject == &c.auth.subject)
             .and_then(|(i, _auth)| Some(Self {
-                header: self.header.clone(),
-                auths: self.auths[0..i+1].to_vec(),
+                id: self.id.clone(),
+                issuer: self.issuer.clone(),
+                certs: self.certs[0..i+1].to_vec(),
+                phantom: PhantomData,
             }))
     }
 
-    /// Shorten the authorization chains for the provided subject, signing it in
+    /// Shorten the authorizations' chain for the provided subject, signing it in
     /// a new reference.
-    pub fn shrink(&self, signer: &M::Signer, subject: &M::PublicKey) -> Option<Self> {
-        match self.auths.iter().find(|a| subject == &a.subject) {
-            Some(auth) => M::public_key(signer)
+    pub fn shrink(&self, signer: &M::Signer, subject: &sign::PublicKey) -> Option<Self> {
+        match self.certs.iter().find(|cert| subject == &cert.auth.subject) {
+            Some(cert) => M::public_key(signer)
                 .and_then(|k| self.subset(&k))
                 .and_then(|mut reference| {
-                    reference.sign(signer, auth.clone()).ok().and(Some(reference))
+                    reference.sign(signer, cert.auth.clone()).ok().and(Some(reference))
                 }),
             _ => None,
         }
@@ -144,69 +161,55 @@ impl<Id,M> Reference<Id,M>
 }
 
 
+/// Validation is tested agains't last user's public-key
 impl<Id,M> Validate for Reference<Id,M>
-    where Id: Clone+Serialize, M: sign::Method
+    where Id: Clone+Serialize, M: sign::SignMethod
 {
     type Error = Error;
-    type Context = M::PublicKey;
+    type Context = sign::PublicKey;
 
     fn validate(&self, subject: &Self::Context) -> Result<(),Self::Error> {
-        // test agains't provided subject
-        match self.auths.last() {
-            Some(auth) if subject != &auth.subject => return Err(Error::Subject),
-            None if subject != &self.header.issuer => return Err(Error::Issuer),
+        // Various checks around subject
+        match self.certs.last() {
+            // Subject must be last subject
+            Some(cert) if subject != &cert.auth.subject => return Err(Error::Subject),
+            // Certificate can not be empty
+            None => return Err(Error::Empty),
             _ => ()
         };
 
-        // tests authorizations
-        let (mut issuer, mut cap): (_, Option<&Capability>) = (&self.header.issuer, None);
-        let mut buf = self.sign_buf();
+        // Check certificates
+        let mut buf = Vec::new();
+        let mut issuer = &self.issuer;
+        let mut last: Option<&Certificate> = None;
 
-        for (index, auth) in self.auths.iter().enumerate() {
-            // test capability
-            if let Some(cap) = cap {
-                if !auth.capability.is_subset(cap) {
-                    return Err(Error::Capability(index))
-                }
-            }
+        for cert in self.certs.iter() {
+            match self.cert_data(issuer, cert.auth.clone(), last) {
+                Ok(cert_data) => {
+                    buf.clear();
+                    if let Err(err) = bincode::serialize_into(&mut buf, &cert_data) {
+                        return Err(Error::Serialize(err))
+                    }
 
-            // test signature
-            if auth.signature.is_none() {
-                return Err(Error::MissingSignature(index));
-            }
+                    let verifier = M::verifier(issuer);
+                    if let Err(err) = verifier.verify(&buf, &cert.signature) {
+                        return Err(Error::Signature(err))
+                    }
 
-            auth.serialize_data(&mut buf);
-
-            let verifier = M::verifier(issuer);
-            if let Err(err) = verifier.verify(&buf, &auth.signature.as_ref().unwrap()) {
-                return Err(Error::Signature(index, err))
-            }
-
-            auth.serialize_sig(&mut buf);
-
-            cap = Some(&auth.capability);
-            issuer = &auth.subject;
+                    issuer = &cert.auth.subject;
+                    last = Some(&cert);
+                },
+                Err(err) => return Err(err),
+            };
         }
         Ok(())
     }
 }
 
 
-impl<Pub,Sig> Authorization<Pub,Sig>
-    where Pub: sign::PublicKey, Sig: sign::Signature
-{
-    pub fn new(capability: Capability, subject: Pub) -> Self {
-        Self { capability, subject, signature: None }
-    }
-
-    fn serialize_data(&self, mut buf: &mut Vec<u8>) {
-        bincode::serialize_into(&mut buf, &self.capability);
-        bincode::serialize_into(&mut buf, self.subject.as_bytes());
-    }
-
-    fn serialize_sig(&self, buf: &mut Vec<u8>) {
-        let sig = self.signature.as_ref().unwrap();
-        bincode::serialize_into(buf, sig.as_ref());
+impl Authorization {
+    pub fn new(capability: Capability, subject: sign::PublicKey) -> Self {
+        Self { capability, subject }
     }
 }
 
@@ -215,16 +218,16 @@ impl<Pub,Sig> Authorization<Pub,Sig>
 mod tests {
     use std::ops::{Deref,DerefMut};
     use crate::expect;
-    use super::super::signature::{Sodium,Method};
+    use super::super::signature::{Sodium,SignMethod};
     use super::*;
 
-    struct TestReference<M: Method> {
+    struct TestReference<M: SignMethod> {
         signers: Vec<M::Signer>,
-        public_keys: Vec<M::PublicKey>,
+        public_keys: Vec<sign::PublicKey>,
         reference: Reference<u64,M>,
     }
 
-    impl<M: Method> Deref for TestReference<M> {
+    impl<M: SignMethod> Deref for TestReference<M> {
         type Target = Reference<u64,M>;
 
         fn deref(&self) -> &Self::Target {
@@ -232,15 +235,16 @@ mod tests {
         }
     }
 
-    impl<M: Method> DerefMut for TestReference<M> {
+    impl<M: SignMethod> DerefMut for TestReference<M> {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.reference
         }
     }
 
-    impl<M: Method> TestReference<M> {
+    impl<M: SignMethod> TestReference<M> {
         fn new(cap: Capability) -> Self {
-            let signers = (0..10).map(|_| M::signer(&M::private_key())).collect::<Vec<_>>();
+            let private_keys = (0..10).map(|_| sign::PrivateKey::generate()).collect::<Vec<_>>();
+            let signers = private_keys.iter().map(|k| M::signer(k)).collect::<Vec<_>>();
             let public_keys = signers.iter()
                 .map(|s| M::public_key(s).expect("error getting public key from signer"))
                 .collect::<Vec<_>>();
@@ -259,14 +263,17 @@ mod tests {
             }
 
             let auth = Authorization::new(capability, self.public_keys[signer+1].clone());
+            println!("test sign at index {}", signer);
             self.reference.sign(&self.signers[signer], auth)
         }
 
         fn sign_n(&mut self, last: Option<usize>, mut capability: Capability) -> Result<(), (usize,Error)> {
             let last = last.unwrap_or_else(|| self.signers.len()-1);
             for i in 1..last {
-                capability.ops >>= 1;
+                println!("sign {}/{}", i, last);
+                capability.actions >>= 1;
                 if let Err(err) = self.sign(i, capability.clone()) {
+                    println!("sign_n error at {}, {}", i, err);
                     return Err((i, err));
                 }
             }
@@ -275,6 +282,7 @@ mod tests {
 
         fn validate(&self, subject: Option<usize>) -> Result<(), Error> {
             let subject = subject.unwrap_or_else(|| self.public_keys.len()-1);
+            println!("validate subject {}", subject);
             self.reference.validate(&self.public_keys[subject])
         }
     }
@@ -293,8 +301,8 @@ mod tests {
         let cap = Capability::new(0b11111111, 0b00000000);
         let mut test = TestReference::<Sodium>::new(cap.clone());
 
-        expect!(test.sign(1, cap.clone()), Err(Error::Capability(_)));
-        expect!(test.sign(2, cap.clone()), Err(Error::Issuer));
+        expect!(test.sign(1, cap.clone()), Err(Error::Capability));
+        expect!(test.sign(2, cap.clone()), Err(Error::Capability));
     }
 
     #[test]
@@ -305,10 +313,10 @@ mod tests {
         expect!(test.sign_n(None, cap), Ok(_));
         expect!(test.validate(None), Ok(_));
 
-        let auth = test.auths.remove(5);
-        expect!(test.validate(Some(test.auths.len())), Err(_));
+        let auth = test.certs.remove(5);
+        expect!(test.validate(Some(test.certs.len())), Err(_));
 
-        test.auths.push(auth);
+        test.certs.push(auth);
         expect!(test.validate(None), Err(_));
     }
 
@@ -325,9 +333,9 @@ mod tests {
         let cap = Capability::new(0b11111111, 0b00001111);
         let mut test = TestReference::<Sodium>::new(cap.clone());
 
-        test.sign(1, cap.subset(cap.ops >> 1, cap.share)).unwrap();
-        test.reference.auths.get_mut(1).unwrap().capability.ops = cap.ops;
-        expect!(test.validate(Some(2)), Err(Error::Capability(_)));
+        test.sign(1, cap.subset(cap.actions >> 1, cap.share)).unwrap();
+        test.reference.certs.get_mut(1).unwrap().auth.capability.actions = cap.actions;
+        expect!(test.validate(Some(2)), Err(Error::Capability));
     }
 
     #[test]
@@ -335,13 +343,13 @@ mod tests {
         let cap = Capability::new(0b11111111, 0b00001111);
         let mut test = TestReference::<Sodium>::new(cap.clone());
 
-        test.sign(1, cap.subset(cap.ops >> 1, cap.share)).unwrap();
+        test.sign(1, cap.subset(cap.actions >> 1, cap.share)).unwrap();
 
         // signature poisoning
-        let sig = test.reference.auths.get(0).unwrap().signature.unwrap().clone();
-        test.reference.auths.get_mut(1).unwrap().signature = Some(sig);
+        let sig = test.reference.certs.get(0).unwrap().signature.clone();
+        test.reference.certs.get_mut(1).unwrap().signature = sig;
 
-        expect!(test.validate(Some(2)), Err(Error::Signature(_,_)));
+        expect!(test.validate(Some(2)), Err(Error::Signature(_)));
     }
 
     #[test]
@@ -353,7 +361,7 @@ mod tests {
 
         let subject = test.public_keys[4];
         let subset = test.reference.subset(&subject).unwrap();
-        if subject != subset.auths.last().unwrap().subject {
+        if subject != subset.certs.last().unwrap().auth.subject {
             panic!("subject in reference and its subset are different")
         }
 
@@ -369,14 +377,13 @@ mod tests {
 
         let (signer, subject) = (&test.signers[2], &test.public_keys[6]);
         let subset = test.reference.shrink(signer, subject).unwrap();
-        let last = subset.auths.last().unwrap();
+        let last = subset.certs.last().unwrap();
 
-        if &last.subject != subject {
-            panic!("subject incorrect: \n{:?}\n{:?}", last.subject, subject)
+        if &last.auth.subject != subject {
+            panic!("subject incorrect: \n{:?}\n{:?}", last.auth.subject, subject)
         }
 
         expect!(subset.validate(&subject), Ok(_));
     }
-
 }
 

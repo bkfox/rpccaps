@@ -40,7 +40,7 @@ impl<T> Decoder for BincodeCodec<T>
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error>
     {
-        let mut size = 0u64;
+        let size = 0u64;
         let header_size = bincode::serialized_size(&size)? as usize;
         if src.len() < header_size {
             return Ok(None);

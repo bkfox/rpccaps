@@ -13,8 +13,8 @@ use serde::{Serialize,Deserialize};
 
 #[derive(Serialize,Deserialize,PartialEq,Clone,Debug)]
 pub struct Capability {
-    /// Allowed operations as a bits field.
-    pub ops: u64,
+    /// Allowed actions as a bits field.
+    pub actions: u64,
     /// Shareable operations as a bits field.
     pub share: u64,
 }
@@ -22,37 +22,47 @@ pub struct Capability {
 
 impl Capability {
     /// Create a capability ensuring valid fields.
-    pub fn new(ops: u64, share: u64) -> Self {
-        let (ops, share) = (ops, (share & ops));
-        Self { ops, share }
+    pub fn new(actions: u64, share: u64) -> Self {
+        let (actions, share) = (actions, (share & actions));
+        Self { actions, share }
+    }
+
+    /// Create an empty capability.
+    pub fn empty() -> Self {
+        Self { actions: 0, share: 0 }
     }
 
     /// Create new capability as subset of `self`.
-    pub fn subset(&self, ops: u64, share: u64) -> Self {
-        let (ops, share) = (ops, (share & ops));
-        Self { ops: self.share & ops, share: self.share & share }
+    pub fn subset(&self, actions: u64, share: u64) -> Self {
+        let (actions, share) = (actions, (share & actions));
+        Self { actions: self.share & actions, share: self.share & share }
     }
 
     /// Make `self` as subset of itself.
-    pub fn subset_inplace(&mut self, ops: u64, share: u64) {
-        self.ops = self.share & ops;
+    pub fn subset_inplace(&mut self, actions: u64, share: u64) {
+        self.actions = self.share & actions;
         self.share= self.share & share;
+    }
+
+    /// Return true if capability is empty
+    pub fn is_empty(&self) -> bool {
+        self.actions == 0 && self.share == 0
     }
 
     /// Verify that capability has valid values.
     pub fn is_valid(&self) -> bool {
-        self.share == self.share & self.ops
+        self.share == self.share & self.actions
     }
 
     /// Return true if provided `self` is a subset of `cap`.
     ///
-    /// A capability B is a subset of capability A if `B.ops in A.shared` and
+    /// A capability B is a subset of capability A if `B.actions in A.shared` and
     /// `B.shared in A.shared`.
     pub fn is_subset(&self, cap: &Self) -> bool {
-        // ops: - cap.share & ~self.ops == 0
-        //      - cap.ops & ~self.ops == 0
+        // actions: - cap.share & ~self.actions == 0
+        //      - cap.actions & ~self.actions == 0
         // share: - cap.share & self.share < cap.share
-        self.ops - (cap.share & cap.ops & self.ops) == 0 &&
+        self.actions - (cap.share & cap.actions & self.actions) == 0 &&
         self.share - (cap.share & self.share) == 0
     }
 }
@@ -62,14 +72,14 @@ impl BitAnd for Capability {
     type Output = Self;
 
     fn bitand(self, rhs: Self) -> Self::Output {
-        self.subset(rhs.ops, rhs.share)
+        self.subset(rhs.actions, rhs.share)
     }
 }
 
 
 impl BitAndAssign for Capability {
     fn bitand_assign(&mut self, rhs: Self) {
-        self.subset_inplace(rhs.ops, rhs.share)
+        self.subset_inplace(rhs.actions, rhs.share)
     }
 }
 
@@ -81,8 +91,8 @@ mod tests {
 
     #[test]
     fn test_subset() {
-        let a =       Capability::new(0b0110, 0b0011);
-        let b =              a.subset(0b1110, 0b1100);
+        let a = Capability::new(0b0110, 0b0011);
+        let b = a.subset(0b1110, 0b1100);
 
         // masks applied
         assert!(a.is_valid());
@@ -98,8 +108,8 @@ mod tests {
 
     #[test]
     fn test_not_subset() {
-        let a =       Capability::new(0b1111, 0b0011);
-        let b =       Capability::new(0b1111, 0b0000);
+        let a = Capability::new(0b1111, 0b0011);
+        let b = Capability::new(0b1111, 0b0000);
         assert!(!b.is_subset(&a));
     }
 

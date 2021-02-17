@@ -6,6 +6,7 @@ use futures::channel::{mpsc,oneshot};
 use futures::prelude::*;
 use futures::task::{Context,Poll};
 use tokio::io::{AsyncRead,AsyncWrite,ReadBuf};
+use tokio_util::codec::Framed;
 
 
 /// Transport implementing `Stream+Sink` or `AsyncRead+AsyncWrite` depending
@@ -34,6 +35,15 @@ impl<S,R> Transport<S,R>
     /// Return inner sender and receiver
     pub fn into_inner(self) -> (S,R) {
         (self.sender, self.receiver)
+    }
+}
+
+impl<S,R> Transport<S,R>
+    where S: Unpin+AsyncWrite, R: Unpin+AsyncRead
+{
+    /// Return new transport framed.
+    pub fn framed<C>(sender: S, receiver: R, codec: C) -> Framed<Self,C> {
+        Framed::new(Self::new(sender, receiver), codec)
     }
 }
 
