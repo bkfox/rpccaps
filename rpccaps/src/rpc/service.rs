@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use futures::prelude::*;
 use serde::{Serialize,de::DeserializeOwned};
 use tokio::io::{AsyncRead,AsyncWrite};
-use tokio_util::codec::{Decoder,Encoder};
+use tokio_util::codec::{Decoder,Encoder,FramedRead,FramedWrite};
 use quinn::Connection;
 
 use crate::data::signature::PublicKey;

@@ -2,82 +2,79 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use futures::prelude::*;
+use futures::future::BoxFuture;
 use tokio::io::{AsyncRead,AsyncWrite};
 
 
-pub struct Handler<'a,S,R> {
-    pub func: Box<dyn 'a+Unpin+Send+Sync+Fn(S, R) -> Box<dyn Send+Unpin+Future<Output=()>>>,
+pub type HandlerFn<S,R> = Box<dyn Unpin+Fn(S,R) -> Pin<Box<dyn Future<Output=()>>>>;
+
+pub struct Handler<S,R> {
+    pub func: HandlerFn<S,R>,
     pub once: bool,
     // TODO timeout
 }
 
 
 /// Low-level api to dispatch sender+receiver to handlers by id.
-pub struct Multiplex<'a,Id,S,R> {
-    pub handlers: BTreeMap<Id, Handler<'a,S,R>>,
+pub struct Multiplex<Id,S,R> {
+    pub handlers: BTreeMap<Id, Handler<S,R>>,
 }
 
-impl<'a,Id,S,R> Multiplex<'a,Id,S,R>
+impl<Id,S,R> Multiplex<Id,S,R>
     where Id: std::cmp::Ord,
 {
     pub fn new() -> Self {
         Self { handlers: BTreeMap::new() }
     }
 
-    pub fn register<F>(&mut self, id: Id, func: Box<F>, once: bool) -> Result<(), Handler<S,R>>
-        where F: 'a+Send+Sync+Unpin+Fn(S,R) -> Box<dyn Send+Unpin+Future<Output=()>>
+    pub fn register(&mut self, id: Id, func: HandlerFn<S,R>, once: bool) -> Result<(), HandlerFn<S,R>>
     {
         let handler = Handler { func, once };
         match self.handlers.insert(id, handler) {
             None => Ok(()),
-            Some(h) => Err(h),
+            Some(h) => Err(h.func),
         }
     }
 
     pub fn unregister(&mut self, id: &Id) {
         self.handlers.remove(id);
     }
-}
 
-
-use super::service::Service;
-
-#[async_trait]
-impl<'a,Id,S,R> Service for Multiplex<'a,Id,S,R>
-    where Id: std::cmp::Ord+Send+Sync+Unpin,
-          S: AsyncWrite+Send+Sync+Unpin, R: AsyncRead+Send+Sync+Unpin
-{
-    type Request = (Id,S,R);
-    type Response = (Id,S,R);
-
-    fn is_alive(&self) -> bool {
-        true
-    }
-
-    async fn dispatch(&mut self, (id, sender, receiver): Self::Request) -> Option<Self::Response>
+    async fn dispatch(&mut self, (id, sender, receiver): (Id, S, R)) -> Result<(), ()>
     {
         let handler = match self.handlers.get(&id) {
-            None => return Some((id, sender, receiver)),
+            None => return Err(()),
             Some(handler) => handler
         };
 
         let ref func = handler.func;
-        func(sender, receiver).await;
+        let fut = func(sender, receiver);
+        fut.await;
 
         if handler.once {
             self.unregister(&id);
         }
-        None
+        Ok(())
     }
 }
 
+use std::pin::Pin;
 
 #[cfg(test)]
 mod test {
+    use futures::executor::LocalPool;
     use super::*;
 
     #[test]
     fn test_multiplex_call() {
+        LocalPool::new().run_until(async {
+            let mut multiplex = Multiplex::<&str,i64,i64>::new();
+            multiplex.register("add", Box::new(|s,r| Box::pin(async move { println!("----- {}", s+r) })), false);
+            multiplex.register("sub", Box::new(|s,r| Box::pin(async move { println!("----- {}", s-r) })), false);
+
+            multiplex.dispatch(("add",2,3)).await;
+            multiplex.dispatch(("sub",3,1)).await;
+        })
     }
 }
 

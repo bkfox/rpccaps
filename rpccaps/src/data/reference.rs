@@ -263,17 +263,14 @@ mod tests {
             }
 
             let auth = Authorization::new(capability, self.public_keys[signer+1].clone());
-            println!("test sign at index {}", signer);
             self.reference.sign(&self.signers[signer], auth)
         }
 
         fn sign_n(&mut self, last: Option<usize>, mut capability: Capability) -> Result<(), (usize,Error)> {
             let last = last.unwrap_or_else(|| self.signers.len()-1);
             for i in 1..last {
-                println!("sign {}/{}", i, last);
                 capability.actions >>= 1;
                 if let Err(err) = self.sign(i, capability.clone()) {
-                    println!("sign_n error at {}, {}", i, err);
                     return Err((i, err));
                 }
             }
@@ -282,7 +279,6 @@ mod tests {
 
         fn validate(&self, subject: Option<usize>) -> Result<(), Error> {
             let subject = subject.unwrap_or_else(|| self.public_keys.len()-1);
-            println!("validate subject {}", subject);
             self.reference.validate(&self.public_keys[subject])
         }
     }

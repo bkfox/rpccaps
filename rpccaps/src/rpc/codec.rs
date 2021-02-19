@@ -32,6 +32,12 @@ impl<T> BincodeCodec<T>
     }
 }
 
+impl<T> Default for BincodeCodec<T> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
+
 impl<T> Encoder<T> for BincodeCodec<T>
     where T: Serialize
 {
