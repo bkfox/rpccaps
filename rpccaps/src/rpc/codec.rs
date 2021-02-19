@@ -3,7 +3,8 @@ use std::marker::PhantomData;
 use bincode;
 use bytes::BytesMut;
 use serde::{Deserialize,Serialize};
-use tokio_util::codec::{Decoder,Encoder};
+use tokio::io::{AsyncRead,AsyncWrite};
+use tokio_util::codec::{Decoder,Encoder,FramedRead,FramedWrite};
 
 
 /// Implement tokio codec for Bincode.
@@ -12,6 +13,22 @@ pub struct BincodeCodec<T>(PhantomData<T>);
 impl<T> BincodeCodec<T> {
     pub fn new() -> Self {
         Self(PhantomData)
+    }
+}
+
+impl<T> BincodeCodec<T>
+    where for <'de> T: Deserialize<'de>
+{
+    pub fn framed_read<R: AsyncRead>(inner: R) -> FramedRead<R,Self> {
+        FramedRead::new(inner, Self::new())
+    }
+}
+
+impl<T> BincodeCodec<T>
+    where T: Serialize
+{
+    pub fn framed_write<R: AsyncWrite>(inner: R) -> FramedWrite<R,Self> {
+        FramedWrite::new(inner, Self::new())
     }
 }
 

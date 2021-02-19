@@ -79,15 +79,15 @@ impl Method {
         match &self.output {
             None => quote! {
                 pub async fn #ident(&mut self, #(#args: #args_ty),*) {
-                    self.transport.send(Message::Request(Request::#ident_cap(#(#args),*))).await;
+                    self.transport.send(Request::#ident_cap(#(#args),*)).await;
                 }
             },
             Some(out) => {
                 quote! {
                     pub async fn #ident(&mut self, #(#args: #args_ty),*) -> Result<#out,()> {
-                        self.transport.send(Message::Request(Request::#ident_cap(#(#args),*))).await;
+                        self.transport.send(Request::#ident_cap(#(#args),*)).await;
                         match self.transport.next().await {
-                            Some(Message::Response(Response::#ident_cap(out))) => Ok(out),
+                            Some(Response::#ident_cap(out)) => Ok(out),
                             _ => Err(()),
                         }
                     }
@@ -135,7 +135,7 @@ impl<'a> Service<'a> {
                 use serde::{Deserialize,Serialize};
 
                 use rpccaps::data::Capability;
-                use rpccaps::rpc::service::{Service,ServiceMessage};
+                use rpccaps::rpc::service::Service;
                 use rpccaps::data::{signature as sig};
 
                 #types
@@ -179,8 +179,6 @@ impl<'a> Service<'a> {
                 #(#responses,)*
                 #phantom
             }
-
-            pub type Message = ServiceMessage<#ty>;
         }
             /*
             impl #impl_generics Into<Capability> for &Request #ty_generics #where_clause {
@@ -224,7 +222,7 @@ impl<'a> Service<'a> {
         let mut generics = self.ast.generics.clone();
         generics.params.push(syn::parse_str::<syn::GenericParam>(r"SinkError: Unpin+Send").unwrap());
         generics.params.push(syn::parse_str::<syn::GenericParam>(&format!(
-            r"Transport: Stream<Item=Message>+Sink<Message,Error=SinkError>+Unpin+Send"
+            r"Transport: Stream<Item=Response>+Sink<Request,Error=SinkError>+Unpin+Send"
         )).unwrap());
 
         let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();

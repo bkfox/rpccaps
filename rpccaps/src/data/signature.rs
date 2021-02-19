@@ -1,4 +1,4 @@
-use std::convert::{TryFrom,TryInto};
+use std::convert::TryFrom;
 
 use signature::{Signer,Verifier};
 use signatory::public_key::PublicKeyed;

@@ -8,7 +8,7 @@ pub mod transport;
 
 pub use codec::BincodeCodec;
 pub use message::{Message,Error};
-pub use service::{Service,ServiceMessage};
+pub use service::{Service,serve_bincode};
 pub use transport::Transport;
 
 

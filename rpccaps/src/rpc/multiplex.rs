@@ -1,26 +1,23 @@
 use std::collections::BTreeMap;
 
+use async_trait::async_trait;
 use futures::prelude::*;
-use serde::{Serialize,de::DeserializeOwned};
 use tokio::io::{AsyncRead,AsyncWrite};
 
-use super::codec::BincodeCodec;
-use super::transport::Transport;
 
-
-pub struct Handler<S,R> {
-    pub func: Box<dyn Fn(S, R) -> Box<dyn Unpin+Future<Output=()>>>,
+pub struct Handler<'a,S,R> {
+    pub func: Box<dyn 'a+Unpin+Send+Sync+Fn(S, R) -> Box<dyn Send+Unpin+Future<Output=()>>>,
     pub once: bool,
     // TODO timeout
 }
 
 
 /// Low-level api to dispatch sender+receiver to handlers by id.
-pub struct Multiplex<Id,S,R> {
-    pub handlers: BTreeMap<Id, Handler<S,R>>,
+pub struct Multiplex<'a,Id,S,R> {
+    pub handlers: BTreeMap<Id, Handler<'a,S,R>>,
 }
 
-impl<Id,S,R> Multiplex<Id,S,R>
+impl<'a,Id,S,R> Multiplex<'a,Id,S,R>
     where Id: std::cmp::Ord,
 {
     pub fn new() -> Self {
@@ -28,7 +25,7 @@ impl<Id,S,R> Multiplex<Id,S,R>
     }
 
     pub fn register<F>(&mut self, id: Id, func: Box<F>, once: bool) -> Result<(), Handler<S,R>>
-        where F: 'static+Fn(S,R) -> Box<dyn Unpin+Future<Output=()>>
+        where F: 'a+Send+Sync+Unpin+Fn(S,R) -> Box<dyn Send+Unpin+Future<Output=()>>
     {
         let handler = Handler { func, once };
         match self.handlers.insert(id, handler) {
@@ -40,8 +37,24 @@ impl<Id,S,R> Multiplex<Id,S,R>
     pub fn unregister(&mut self, id: &Id) {
         self.handlers.remove(id);
     }
+}
 
-    pub async fn dispatch(&mut self, id: Id, sender: S, receiver: R) -> Option<(Id,S,R)>
+
+use super::service::Service;
+
+#[async_trait]
+impl<'a,Id,S,R> Service for Multiplex<'a,Id,S,R>
+    where Id: std::cmp::Ord+Send+Sync+Unpin,
+          S: AsyncWrite+Send+Sync+Unpin, R: AsyncRead+Send+Sync+Unpin
+{
+    type Request = (Id,S,R);
+    type Response = (Id,S,R);
+
+    fn is_alive(&self) -> bool {
+        true
+    }
+
+    async fn dispatch(&mut self, (id, sender, receiver): Self::Request) -> Option<Self::Response>
     {
         let handler = match self.handlers.get(&id) {
             None => return Some((id, sender, receiver)),
@@ -59,45 +72,13 @@ impl<Id,S,R> Multiplex<Id,S,R>
 }
 
 
-use super::service::Service;
+#[cfg(test)]
+mod test {
+    use super::*;
 
-impl<Id,S,R> Service for Multiplex<Id,S,R>
-    where Id: std::cmp::Ord+Send+Sync+Unpin,
-          S: AsyncWrite+Unpin, R: AsyncRead+Unpin
-{
-    type Request = (Id,S,R);
-    type Response = (Id,S,R);
-
-    pub async fn serve(&mut self, sender: S, receiver: R) -> Result<Option<(Id,S,R)>,(S,R)> {
-        let codec = BincodeCodec::<Id>::new();
-        let mut transport = Transport::framed(sender, receiver, codec);
-        let id = match transport.next().await {
-            Some(Ok(id)) => id,
-            _ => {
-                let (sender, receiver) = transport.into_inner().into_inner();
-                return Err((sender,receiver))
-            }
-        };
-
-        let (sender, receiver) = transport.into_inner().into_inner();
-        Ok(self.dispatch(id, sender, receiver).await)
+    #[test]
+    fn test_multiplex_call() {
     }
 }
-
-
-
-/*
-        match self.transport.poll_next() {
-            Poll::Ready(Some((id, sender, receiver))) => {
-                self.get_mut().dispatch(id, sender, receiver).await;
-                Poll::Pending,
-            },
-            poll => poll,
-        }
-
-        Pin::new(&mut self.get_mut().receiver).poll_next(cx)
-    }
-}
-*/
 
 

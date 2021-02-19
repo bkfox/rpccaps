@@ -1,12 +1,13 @@
 //! Provide bi-directionnal MPMC broadcast
 use std::io;
+use std::marker::Unpin;
 use std::pin::Pin;
 
 use futures::channel::{mpsc,oneshot};
 use futures::prelude::*;
 use futures::task::{Context,Poll};
 use tokio::io::{AsyncRead,AsyncWrite,ReadBuf};
-use tokio_util::codec::Framed;
+
 
 
 /// Transport implementing `Stream+Sink` or `AsyncRead+AsyncWrite` depending
@@ -19,6 +20,7 @@ pub struct Transport<S,R> {
     /// Receiver
     pub receiver: R,
 }
+
 
 /// Transport of mpsc sender and receiver.
 pub type MPSCTransport<S,R> = Transport<mpsc::Sender<S>, mpsc::Receiver<R>>;
@@ -35,15 +37,6 @@ impl<S,R> Transport<S,R>
     /// Return inner sender and receiver
     pub fn into_inner(self) -> (S,R) {
         (self.sender, self.receiver)
-    }
-}
-
-impl<S,R> Transport<S,R>
-    where S: Unpin+AsyncWrite, R: Unpin+AsyncRead
-{
-    /// Return new transport framed.
-    pub fn framed<C>(sender: S, receiver: R, codec: C) -> Framed<Self,C> {
-        Framed::new(Self::new(sender, receiver), codec)
     }
 }
 
@@ -67,6 +60,9 @@ impl<S,R> Transport<oneshot::Sender<S>, oneshot::Receiver<R>>
     }
 }
 
+
+impl<S,R> Unpin for Transport<S,R>
+    where R: Unpin, S: Unpin {}
 
 impl<I,S,R> Sink<I> for Transport<S,R>
     where S: Sink<I>+Unpin, R: Unpin
@@ -100,7 +96,6 @@ impl<S,R> Stream for Transport<S,R>
         Pin::new(&mut self.get_mut().receiver).poll_next(cx)
     }
 }
-
 
 impl<S,R> AsyncRead for Transport<S,R>
     where S: AsyncWrite+Unpin, R: AsyncRead+Unpin
