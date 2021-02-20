@@ -13,7 +13,7 @@ use super::signature as sign;
 
 #[derive(Debug)]
 pub enum Error {
-    Empty, Capability, Issuer, Subject,
+    Empty, Capability, Issuer, Subject, MaxShare,
     Serialize(bincode::Error),
     Signature(sign::Error),
 }
@@ -36,6 +36,7 @@ pub struct Reference<Id,M>
     id: Id,
     #[serde(with="bytes")]
     issuer: sign::PublicKey,
+    max_share: u32,
     certs: Vec<Certificate>,
     phantom: PhantomData<M>,
 }
@@ -60,7 +61,7 @@ pub struct Authorization
 
 #[derive(Serialize,Deserialize,PartialEq,Clone)]
 pub enum CertData<Id> {
-    Reference(Authorization, Id, #[serde(with="bytes")] sign::PublicKey),
+    Reference(Authorization, Id, #[serde(with="bytes")] sign::PublicKey, u32),
     Signature(Authorization, #[serde(with="bytes")] sign::Signature),
 }
 
@@ -69,13 +70,17 @@ impl<Id,M> Reference<Id,M>
     where Id: Clone+Serialize, M: sign::SignMethod
 {
     /// Create a new reference, signing it with the provided keys.
-    pub fn new(signer: &M::Signer, id: Id, auth: Authorization) -> Result<Self,Error>
+    pub fn new(id: Id, issuer: &M::Signer, max_share: u32, auth: Authorization)
+        -> Result<Self,Error>
     {
-        match M::public_key(signer) {
-            Some(issuer) => {
-                let mut reference = Self { id, issuer, certs: Vec::with_capacity(1),
-                                           phantom: PhantomData };
-                reference.sign(signer, auth).and(Ok(reference))
+        match M::public_key(issuer) {
+            Some(issuer_pk) => {
+                let mut reference = Self {
+                    id, issuer: issuer_pk, max_share,
+                    certs: Vec::with_capacity(1),
+                    phantom: PhantomData
+                };
+                reference.sign(issuer, auth).and(Ok(reference))
             },
             _ => Err(Error::Issuer),
         }
@@ -102,8 +107,8 @@ impl<Id,M> Reference<Id,M>
                  last: Option<&Certificate>)
         -> Result<CertData<Id>,Error>
     {
-        match last {
-            None => Ok(CertData::Reference(auth, self.id.clone(), self.issuer)),
+       match last {
+            None => Ok(CertData::Reference(auth, self.id.clone(), self.issuer, self.max_share)),
             Some(last) => {
                 // test: auth must be subset of last auth
                 if !auth.capability.is_subset(&last.auth.capability) {
@@ -119,13 +124,17 @@ impl<Id,M> Reference<Id,M>
     }
 
     /// Add a new signature to the reference.
-    pub fn sign(&mut self, signer: &M::Signer, auth: Authorization) -> Result<(), Error> {
-        let cert_data = self.cert_data(&M::public_key(&signer).unwrap(), auth.clone(),
+    pub fn sign(&mut self, issuer: &M::Signer, auth: Authorization) -> Result<(), Error> {
+        if self.certs.len() >= (self.max_share as usize)+1 {
+            return Err(Error::MaxShare);
+        }
+
+        let cert_data = self.cert_data(&M::public_key(&issuer).unwrap(), auth.clone(),
                                        self.certs.last());
         match cert_data {
             Ok(cert_data) => bincode::serialize(&cert_data)
                 .or_else(|err| Err(Error::Serialize(err)))
-                .and_then(|buf| signer.try_sign(&buf)
+                .and_then(|buf| issuer.try_sign(&buf)
                                       .or_else(|err| Err(Error::Signature(err))))
                 .and_then(|signature| {
                     self.certs.push(Certificate { auth, signature });
@@ -141,6 +150,7 @@ impl<Id,M> Reference<Id,M>
             .and_then(|(i, _auth)| Some(Self {
                 id: self.id.clone(),
                 issuer: self.issuer.clone(),
+                max_share: self.max_share,
                 certs: self.certs[0..i+1].to_vec(),
                 phantom: PhantomData,
             }))
@@ -169,6 +179,11 @@ impl<Id,M> Validate for Reference<Id,M>
     type Context = sign::PublicKey;
 
     fn validate(&self, subject: &Self::Context) -> Result<(),Self::Error> {
+        // Max share count
+        if self.certs.len() > (self.max_share as usize)+1 {
+            return Err(Error::MaxShare);
+        }
+
         // Various checks around subject
         match self.certs.last() {
             // Subject must be last subject
@@ -242,7 +257,7 @@ mod tests {
     }
 
     impl<M: SignMethod> TestReference<M> {
-        fn new(cap: Capability) -> Self {
+        fn new(max_share: u32, cap: Capability) -> Self {
             let private_keys = (0..10).map(|_| sign::PrivateKey::generate()).collect::<Vec<_>>();
             let signers = private_keys.iter().map(|k| M::signer(k)).collect::<Vec<_>>();
             let public_keys = signers.iter()
@@ -250,7 +265,7 @@ mod tests {
                 .collect::<Vec<_>>();
 
             let auth = Authorization::new(cap, public_keys[1].clone());
-            let reference = Reference::<u64,M>::new(&signers[0], 0u64, auth)
+            let reference = Reference::<u64,M>::new(0u64, &signers[0], max_share, auth)
                                 .expect("can not create reference");
 
             Self { signers, public_keys, reference }
@@ -286,7 +301,7 @@ mod tests {
     #[test]
     fn test_sign_ok() {
         let cap = Capability::new(0b11111111, 0b11111111);
-        let mut test = TestReference::<Sodium>::new(cap.clone());
+        let mut test = TestReference::<Sodium>::new(64, cap.clone());
 
         expect!(test.sign_n(None, cap), Ok(_));
         expect!(test.validate(None), Ok(_));
@@ -295,16 +310,25 @@ mod tests {
     #[test]
     fn test_sign_err() {
         let cap = Capability::new(0b11111111, 0b00000000);
-        let mut test = TestReference::<Sodium>::new(cap.clone());
+        let mut test = TestReference::<Sodium>::new(64, cap.clone());
 
         expect!(test.sign(1, cap.clone()), Err(Error::Capability));
         expect!(test.sign(2, cap.clone()), Err(Error::Capability));
     }
 
     #[test]
+    fn test_sign_max_share() {
+        let cap = Capability::new(0b11111111, 0b11111111);
+        let mut test = TestReference::<Sodium>::new(0, cap.clone());
+
+        expect!(test.sign_n(None, cap), Err((_, Error::MaxShare)));
+        // TODO expect!(test.validate(None), Ok(_));
+    }
+
+    #[test]
     fn test_validate_err_auth() {
         let cap = Capability::new(0b11111111, 0b11111111);
-        let mut test = TestReference::<Sodium>::new(cap.clone());
+        let mut test = TestReference::<Sodium>::new(64, cap.clone());
 
         expect!(test.sign_n(None, cap), Ok(_));
         expect!(test.validate(None), Ok(_));
@@ -319,7 +343,7 @@ mod tests {
     #[test]
     fn test_validate_err_subject() {
         let cap = Capability::new(0b11111111, 0b00001111);
-        let test = TestReference::<Sodium>::new(cap.clone());
+        let test = TestReference::<Sodium>::new(64, cap.clone());
 
         expect!(test.validate(Some(2)), Err(Error::Subject));
     }
@@ -327,7 +351,7 @@ mod tests {
     #[test]
     fn test_validate_err_cap() {
         let cap = Capability::new(0b11111111, 0b00001111);
-        let mut test = TestReference::<Sodium>::new(cap.clone());
+        let mut test = TestReference::<Sodium>::new(64, cap.clone());
 
         test.sign(1, cap.subset(cap.actions >> 1, cap.share)).unwrap();
         test.reference.certs.get_mut(1).unwrap().auth.capability.actions = cap.actions;
@@ -337,7 +361,7 @@ mod tests {
     #[test]
     fn test_validate_err_sign() {
         let cap = Capability::new(0b11111111, 0b00001111);
-        let mut test = TestReference::<Sodium>::new(cap.clone());
+        let mut test = TestReference::<Sodium>::new(64, cap.clone());
 
         test.sign(1, cap.subset(cap.actions >> 1, cap.share)).unwrap();
 
@@ -351,7 +375,7 @@ mod tests {
     #[test]
     fn test_subset() {
         let cap = Capability::new(0b11111111, 0b11111111);
-        let mut test = TestReference::<Sodium>::new(cap.clone());
+        let mut test = TestReference::<Sodium>::new(64, cap.clone());
 
         test.sign_n(None, cap).unwrap();
 
@@ -367,7 +391,7 @@ mod tests {
     #[test]
     fn test_shrink() {
         let cap = Capability::new(0b11111111, 0b11111111);
-        let mut test = TestReference::<Sodium>::new(cap.clone());
+        let mut test = TestReference::<Sodium>::new(64, cap.clone());
 
         test.sign_n(None, cap).unwrap();
 
