@@ -8,6 +8,3 @@ pub use capability::Capability;
 pub use reference::{Authorization,Reference};
 pub use self::signature::SignMethod;
 
-
-// TODO: read/write file as objects
-
