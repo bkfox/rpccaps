@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use futures::prelude::*;
 use tokio::io::{AsyncRead,AsyncWrite};
@@ -17,6 +19,12 @@ pub trait Service: Send+Sync+Unpin
 
     /// Return True if service should be kept alive
     fn is_alive(&self) -> bool;
+
+    /// Service metadata
+    fn metas() -> &'static [(&'static str, &'static str)] {
+        static metas : [(&'static str, &'static str);0] = [];
+        &metas
+    }
 
     /// Dispatch request
     async fn dispatch(&mut self, request: Self::Request) -> Option<Self::Response>;

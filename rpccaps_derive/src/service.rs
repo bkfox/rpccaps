@@ -115,6 +115,8 @@ impl<'a> Service<'a> {
         assert!(methods.len() <= 64, "a maximum 64 rpc methods is allowed");
 
         let mut meta = Attributes::from_attrs("service", &mut ast.attrs);
+        meta.read_attrs("meta", &mut ast.attrs);
+
         Self { ast, methods, meta }
     }
 
@@ -127,6 +129,7 @@ impl<'a> Service<'a> {
 
             pub mod service {
                 use super::*;
+                use std::collections::BTreeMap;
                 use std::marker::PhantomData;
                 use futures::prelude::*;
                 use futures::future::{Future,FutureExt,ok,err};
@@ -197,12 +200,24 @@ impl<'a> Service<'a> {
         let ty = &*self.ast.self_ty;
         let (impl_generics, ty_generics, where_clause) = self.ast.generics.split_for_impl();
 
+        let metas = self.meta.iter().map(|(k,v)| match v {
+            None => quote! { (#k, "") },
+            Some(v) => quote! { (#k, #v) },
+        }).collect::<Vec<_>>();
+        let metas_len = metas.len();
+
         let variants = self.methods.iter().map(|method| method.server_dispatch_variant());
+
         quote! {
             #[async_trait]
             impl #impl_generics Service for #ty #ty_generics #where_clause {
                 type Request = Request<#ty_generics>;
                 type Response = Response<#ty_generics>;
+
+                fn metas() -> &'static [(&'static str, &'static str)] {
+                    static metas : [(&'static str, &'static str); #metas_len] = [#(#metas),*];
+                    &metas
+                }
 
                 fn is_alive(&self) -> bool {
                     true
