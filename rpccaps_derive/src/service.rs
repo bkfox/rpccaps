@@ -55,13 +55,13 @@ impl Method {
         })
     }
 
-    fn get_dispatch_variant(&self) -> TokenStream2 {
-        let call = self.get_dispatch_call();
+    fn server_dispatch_variant(&self) -> TokenStream2 {
+        let call = self.server_dispatch_call();
         let Self { ident_cap, args, .. } = self;
         quote! { Request::#ident_cap(#(#args),*) => { #call } }
     }
 
-    fn get_dispatch_call(&self) -> TokenStream2 {
+    fn server_dispatch_call(&self) -> TokenStream2 {
         let Self { ident_cap, ident, args, is_async, .. } = self;
         let invoke = match is_async {
             false => quote! { self.#ident(#(#args),*) },
@@ -74,7 +74,7 @@ impl Method {
         }
     }
 
-    fn get_client_method(&self) -> TokenStream2 {
+    fn client_method(&self) -> TokenStream2 {
         let Self { ident, ident_cap, args, args_ty, .. } = self;
         match &self.output {
             None => quote! {
@@ -197,7 +197,7 @@ impl<'a> Service<'a> {
         let ty = &*self.ast.self_ty;
         let (impl_generics, ty_generics, where_clause) = self.ast.generics.split_for_impl();
 
-        let variants = self.methods.iter().map(|method| method.get_dispatch_variant());
+        let variants = self.methods.iter().map(|method| method.server_dispatch_variant());
         quote! {
             #[async_trait]
             impl #impl_generics Service for #ty #ty_generics #where_clause {
@@ -226,7 +226,7 @@ impl<'a> Service<'a> {
         )).unwrap());
 
         let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-        let methods = self.methods.iter().map(|m| m.get_client_method());
+        let methods = self.methods.iter().map(|m| m.client_method());
 
         quote! {
             pub struct Client #impl_generics #where_clause {

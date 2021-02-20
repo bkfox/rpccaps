@@ -1,12 +1,10 @@
 use async_trait::async_trait;
 use futures::prelude::*;
-use serde::{Serialize,de::DeserializeOwned};
 use tokio::io::{AsyncRead,AsyncWrite};
 use tokio_util::codec::{Decoder,Encoder,FramedRead,FramedWrite};
 use quinn::Connection;
 
 use crate::data::signature::PublicKey;
-use super::codec::BincodeCodec;
 use super::transport::Transport;
 
 // TODO:
@@ -42,8 +40,8 @@ pub trait Service: Send+Sync+Unpin
 
     /// Serve provided transport
     async fn serve<T,E>(&mut self, mut transport: T)
-        where T: Stream<Item=Self::Request>+Sink<Self::Response,Error=E>+Unpin+Send,
-              E: Unpin+Send
+        where T: Stream<Item=Self::Request>+Sink<Self::Response,Error=E>+Send+Unpin,
+              E: Send+Unpin
     {
         while let (true, Some(req)) = (self.is_alive(), transport.next().await) {
             match self.dispatch(req).await {
@@ -55,20 +53,21 @@ pub trait Service: Send+Sync+Unpin
             }
         }
     }
-}
 
-
-/// Run service for provided sender/receiver using bincode format.
-pub async fn serve_bincode<F,S,R,FR,FS>(service: &mut F, sender: S, receiver: R)
-    where F: Service<Request=FR, Response=FS>,
-          FR: Serialize+DeserializeOwned+Send+Sync+Unpin,
-          FS: Serialize+DeserializeOwned+Send+Sync+Unpin,
-          S: AsyncWrite+Unpin+Send, R: AsyncRead+Unpin+Send,
-{
-    let stream = BincodeCodec::<FR>::framed_read(receiver)
-                    .filter_map(|req| { future::ready(req.ok()) });
-    let sink = BincodeCodec::<FS>::framed_write(sender);
-    service.serve(Transport::new(sink,stream)).await
+    /// Run service for provided sender/receiver using bincode format.
+    async fn handle<S,R,E,D>(&mut self, sender: S, receiver: R,
+                             encoder: E, decoder: D)
+        where S: AsyncWrite+Send+Unpin,
+              R: AsyncRead+Send+Unpin,
+              E: Encoder<Self::Response>+Send+Unpin,
+              E::Error: Send+Unpin,
+              D: Decoder<Item=Self::Request>+Send+Unpin,
+    {
+        let stream = FramedRead::new(receiver, decoder)
+            .filter_map(|req| { future::ready(req.ok()) });
+        let sink = FramedWrite::new(sender, encoder);
+        self.serve(Transport::new(sink,stream)).await
+    }
 }
 
 
@@ -132,7 +131,7 @@ mod test {
 
         let server_fut = async move {
             let (s,r) = server_transport.split();
-            let transport = Transport::new(s, r.then(|x| { future::ready(x) }).boxed());
+            let transport = Transport::new(s, r);
             let mut service = SimpleService::new();
             service.serve(transport).await;
         };
