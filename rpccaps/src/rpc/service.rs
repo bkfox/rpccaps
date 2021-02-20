@@ -2,25 +2,8 @@ use async_trait::async_trait;
 use futures::prelude::*;
 use tokio::io::{AsyncRead,AsyncWrite};
 use tokio_util::codec::{Decoder,Encoder,FramedRead,FramedWrite};
-use quinn::Connection;
 
-use crate::data::signature::PublicKey;
 use super::transport::Transport;
-
-// TODO:
-// - service_derive:
-//      - #[rpc(is_alive)] => use this method as is_alive result
-//      - request timeout
-
-pub struct Context
-{
-    /// Service router id
-    pub service_id: u64,
-    /// Connection being used
-    pub connection: Connection,
-    /// Remote peer id key
-    pub peer_key: Option<PublicKey>,
-}
 
 
 /// Generic Service trait that handling requests and call corresponding RPC method.
