@@ -30,15 +30,18 @@ pub fn to_camel_ident(ident: &syn::Ident) -> syn::Ident {
 
 
 /// Run over attributes with the provided function, removing attribute when `func` returns `true`.
-pub fn drain_attrs(attrs: &mut Vec<syn::Attribute>, mut func: impl FnMut(&syn::Attribute) -> bool)
+/// Return the count of removed attributes.
+pub fn drain_attrs(attrs: &mut Vec<syn::Attribute>, mut func: impl FnMut(&syn::Attribute) -> bool) -> usize
 {
-    let mut i = 0;
+    let (mut i, mut count) = (0,0);
     while i != attrs.len() {
         if func(&attrs[i]) {
             attrs.remove(i);
+            count += 1;
         }
         else { i += 1 }
     }
+    count
 }
 
 
@@ -102,7 +105,7 @@ impl Attributes {
                 },
                 _ => false,
             }
-        })
+        });
     }
 
     /// Add attribute from `syn::NestedMeta`.

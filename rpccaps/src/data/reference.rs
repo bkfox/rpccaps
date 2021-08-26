@@ -30,15 +30,15 @@ impl fmt::Display for Error {
 ///
 /// It implements various utilities to sign and validate it.
 #[derive(Serialize,Deserialize,PartialEq,Clone)]
-pub struct Reference<Id,M>
-    where Id: Clone+Serialize
+pub struct Reference<Id,Sign>
+    where Id: Clone
 {
     id: Id,
     #[serde(with="bytes")]
     issuer: sign::PublicKey,
     max_share: u32,
     certs: Vec<Certificate>,
-    phantom: PhantomData<M>,
+    phantom: PhantomData<Sign>,
 }
 
 
@@ -66,14 +66,14 @@ pub enum CertData<Id> {
 }
 
 
-impl<Id,M> Reference<Id,M>
-    where Id: Clone+Serialize, M: sign::SignMethod
+impl<Id,Sign> Reference<Id,Sign>
+    where Id: Clone+Serialize, Sign: sign::SignMethod
 {
     /// Create a new reference, signing it with the provided keys.
-    pub fn new(id: Id, issuer: &M::Signer, max_share: u32, auth: Authorization)
+    pub fn new(id: Id, issuer: &Sign::Signer, max_share: u32, auth: Authorization)
         -> Result<Self,Error>
     {
-        match M::public_key(issuer) {
+        match Sign::public_key(issuer) {
             Some(issuer_pk) => {
                 let mut reference = Self {
                     id, issuer: issuer_pk, max_share,
@@ -124,12 +124,12 @@ impl<Id,M> Reference<Id,M>
     }
 
     /// Add a new signature to the reference.
-    pub fn sign(&mut self, issuer: &M::Signer, auth: Authorization) -> Result<(), Error> {
+    pub fn sign(&mut self, issuer: &Sign::Signer, auth: Authorization) -> Result<(), Error> {
         if self.certs.len() >= (self.max_share as usize)+1 {
             return Err(Error::MaxShare);
         }
 
-        let cert_data = self.cert_data(&M::public_key(&issuer).unwrap(), auth.clone(),
+        let cert_data = self.cert_data(&Sign::public_key(&issuer).unwrap(), auth.clone(),
                                        self.certs.last());
         match cert_data {
             Ok(cert_data) => bincode::serialize(&cert_data)
@@ -158,9 +158,9 @@ impl<Id,M> Reference<Id,M>
 
     /// Shorten the authorizations' chain for the provided subject, signing it in
     /// a new reference.
-    pub fn shrink(&self, signer: &M::Signer, subject: &sign::PublicKey) -> Option<Self> {
+    pub fn shrink(&self, signer: &Sign::Signer, subject: &sign::PublicKey) -> Option<Self> {
         match self.certs.iter().find(|cert| subject == &cert.auth.subject) {
-            Some(cert) => M::public_key(signer)
+            Some(cert) => Sign::public_key(signer)
                 .and_then(|k| self.subset(&k))
                 .and_then(|mut reference| {
                     reference.sign(signer, cert.auth.clone()).ok().and(Some(reference))
@@ -172,8 +172,8 @@ impl<Id,M> Reference<Id,M>
 
 
 /// Validation is tested agains't last user's public-key
-impl<Id,M> Validate for Reference<Id,M>
-    where Id: Clone+Serialize, M: sign::SignMethod
+impl<Id,Sign> Validate for Reference<Id,Sign>
+    where Id: Clone+Serialize, Sign: sign::SignMethod
 {
     type Error = Error;
     type Context = sign::PublicKey;
@@ -206,7 +206,7 @@ impl<Id,M> Validate for Reference<Id,M>
                         return Err(Error::Serialize(err))
                     }
 
-                    let verifier = M::verifier(issuer);
+                    let verifier = Sign::verifier(issuer);
                     if let Err(err) = verifier.verify(&buf, &cert.signature) {
                         return Err(Error::Signature(err))
                     }
@@ -236,36 +236,36 @@ mod tests {
     use super::super::signature::{Sodium,SignMethod};
     use super::*;
 
-    struct TestReference<M: SignMethod> {
-        signers: Vec<M::Signer>,
+    struct TestReference<Sign: SignMethod> {
+        signers: Vec<Sign::Signer>,
         public_keys: Vec<sign::PublicKey>,
-        reference: Reference<u64,M>,
+        reference: Reference<u64,Sign>,
     }
 
-    impl<M: SignMethod> Deref for TestReference<M> {
-        type Target = Reference<u64,M>;
+    impl<Sign: SignMethod> Deref for TestReference<Sign> {
+        type Target = Reference<u64,Sign>;
 
         fn deref(&self) -> &Self::Target {
             &self.reference
         }
     }
 
-    impl<M: SignMethod> DerefMut for TestReference<M> {
+    impl<Sign: SignMethod> DerefMut for TestReference<Sign> {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.reference
         }
     }
 
-    impl<M: SignMethod> TestReference<M> {
+    impl<Sign: SignMethod> TestReference<Sign> {
         fn new(max_share: u32, cap: Capability) -> Self {
             let private_keys = (0..10).map(|_| sign::PrivateKey::generate()).collect::<Vec<_>>();
-            let signers = private_keys.iter().map(|k| M::signer(k)).collect::<Vec<_>>();
+            let signers = private_keys.iter().map(|k| Sign::signer(k)).collect::<Vec<_>>();
             let public_keys = signers.iter()
-                .map(|s| M::public_key(s).expect("error getting public key from signer"))
+                .map(|s| Sign::public_key(s).expect("error getting public key from signer"))
                 .collect::<Vec<_>>();
 
             let auth = Authorization::new(cap, public_keys[1].clone());
-            let reference = Reference::<u64,M>::new(0u64, &signers[0], max_share, auth)
+            let reference = Reference::<u64,Sign>::new(0u64, &signers[0], max_share, auth)
                                 .expect("can not create reference");
 
             Self { signers, public_keys, reference }

@@ -2,12 +2,29 @@
 //! This module is used for cryptographic serialization.
 use std::{mem,fmt};
 use std::marker::PhantomData;
-use serde::{Serializer,Deserializer,de};
+use serde::{Serialize,Deserialize,Serializer,Deserializer,de};
 
+
+/**
+ * Provides from/as bytes conversion and de-serialization for objects
+ * not implementing serde.
+ */
 pub trait Bytes: Clone+Sized {
     fn from_bytes<B: AsRef<[u8]>>(b: B) -> Option<Self>;
     fn as_bytes(&self) -> &[u8];
 }
+
+
+/**
+ * Wrapper around Bytes implementor to be used for serialization and
+ * deserialization
+ */
+#[derive(Serialize,Deserialize,Clone)]
+pub struct AsBytes<T: Bytes> {
+    #[serde(serialize_with="serialize",deserialize_with="deserialize")]
+    inner: T
+}
+
 
 /// Serialize provided value as bytes
 pub fn serialize<S,T>(value: &T, ser: S) -> Result<S::Ok, S::Error>
@@ -38,6 +55,41 @@ pub fn deserialize<'de,D,T>(de: D) -> Result<T, D::Error>
     }
 
     de.deserialize_bytes(BytesVisitor::<T>(PhantomData))
+}
+
+
+impl<T: Bytes> AsBytes<T> {
+    pub fn new(inner: T) -> Self {
+        Self { inner }
+    }
+
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+}
+
+impl<T: Bytes> ::std::ops::Deref for AsBytes<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T: Bytes> ::std::ops::DerefMut for AsBytes<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+}
+
+impl<T: Bytes> Bytes for AsBytes<T> {
+    fn from_bytes<B: AsRef<[u8]>>(b: B) -> Option<Self> {
+        T::from_bytes(b).map(|i| Self::new(i))
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.inner.as_bytes()
+    }
 }
 
 

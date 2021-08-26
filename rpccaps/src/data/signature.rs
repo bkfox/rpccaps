@@ -2,10 +2,11 @@ use std::convert::TryFrom;
 
 use signature::{Signer,Verifier};
 use signatory::public_key::PublicKeyed;
-pub use signatory::ed25519::{Seed as PrivateKey, PublicKey, Signature};
-pub use signature::Error;
 
 use super::bytes;
+
+pub use signatory::ed25519::{Seed as PrivateKey, PublicKey, Signature};
+pub use signature::Error;
 
 
 pub trait SignMethod {

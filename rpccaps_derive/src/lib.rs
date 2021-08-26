@@ -1,6 +1,9 @@
 use proc_macro::TokenStream;
+use syn;
 
 
+// mod client;
+mod method;
 mod service;
 mod utils;
 
@@ -18,7 +21,9 @@ mod utils;
 /// # Example
 ///
 #[proc_macro_attribute]
-pub fn service(a: TokenStream, i: TokenStream) -> TokenStream {
-    service::service(a, i)
+pub fn service(_attrs: TokenStream, input: TokenStream) -> TokenStream {
+    let mut ast = syn::parse::<syn::ItemImpl>(input).unwrap();
+    let service = crate::service::Service::new(&mut ast);
+    service.generate()
 }
 
