@@ -41,7 +41,17 @@ impl Capability {
     /// Make `self` as subset of itself.
     pub fn subset_inplace(&mut self, actions: u64, share: u64) {
         self.actions = self.share & actions;
-        self.share= self.share & share;
+        self.share = self.share & share;
+    }
+
+    /// Return true if action is allowed
+    pub fn is_allowed(&self, action: u64) -> bool {
+        (self.actions & action) != 0
+    }
+
+    /// Return true if action can be shared
+    pub fn is_shareable(&self, action: u64) -> bool {
+        (self.share & action) != 0
     }
 
     /// Return true if capability is empty
@@ -60,8 +70,8 @@ impl Capability {
     /// `B.shared in A.shared`.
     pub fn is_subset(&self, cap: &Self) -> bool {
         // actions: - cap.share & ~self.actions == 0
-        //      - cap.actions & ~self.actions == 0
-        // share: - cap.share & self.share < cap.share
+        //          - cap.actions & ~self.actions == 0
+        // share:   - cap.share & self.share < cap.share
         self.actions - (cap.share & cap.actions & self.actions) == 0 &&
         self.share - (cap.share & self.share) == 0
     }

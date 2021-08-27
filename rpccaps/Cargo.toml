@@ -20,11 +20,10 @@ byteorder = "1.3.4"
 serde= { version="1.0", features=["derive"] }
 uuid = { version = "0.8", features = ["serde", "v5"] }
 
-signature="1.0"
-signatory={ version="0.21", features=["ed25519"] }
-signatory-dalek="0.20"
-signatory-sodiumoxide="0.21"
-ed25519="1.0"
+rand_core={ version="0.5", features = ["std", "getrandom"] }
+signature={ version="1.2", features = ["std"] }
+ed25519="1.2"
+ed25519-dalek="1.0.1"
 
 futures="0.3"
 futures-util = "0.3"

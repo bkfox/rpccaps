@@ -27,7 +27,7 @@ pub trait Service: Send+Sync+Unpin
     /// Dispatch request
     async fn dispatch(&mut self, request: Self::Request) -> Option<Self::Response>;
 
-    /// Serve provided transport
+    /// Serve provided request-response transport
     async fn serve<T,E>(&mut self, mut transport: T)
         where T: Stream<Item=Self::Request>+Sink<Self::Response,Error=E>+Send+Unpin,
               E: Send+Unpin
@@ -44,9 +44,10 @@ pub trait Service: Send+Sync+Unpin
     }
 
     /// Run service for provided sender/receiver using bincode format.
-    async fn handle<S,R,E,D>(&mut self, sender: S, receiver: R,
-                             encoder: E, decoder: D)
-        where S: AsyncWrite+Send+Unpin,
+    async fn serve_stream<S,R,E,D>(mut self, (sender, receiver): (S,R),
+                                   encoder: E, decoder: D)
+        where Self: Sized,
+              S: AsyncWrite+Send+Unpin,
               R: AsyncRead+Send+Unpin,
               E: Encoder<Self::Response>+Send+Unpin,
               E::Error: Send+Unpin,
@@ -62,7 +63,7 @@ pub trait Service: Send+Sync+Unpin
 
 
 #[cfg(test)]
-mod test {
+pub mod tests {
     use futures::future::join;
     use futures::executor::LocalPool;
 
@@ -76,18 +77,18 @@ mod test {
     }
 
     impl SimpleService {
-        fn new() -> Self {
+        pub fn new() -> Self {
             Self { a: 0 }
         }
     }
 
     #[service]
     impl SimpleService {
-        fn clear(&mut self) {
+        pub fn clear(&mut self) {
             self.a = 0;
         }
 
-        fn add(&mut self, a: u32) -> u32 {
+        pub fn add(&mut self, a: u32) -> u32 {
             self.a += a;
             self.a
         }

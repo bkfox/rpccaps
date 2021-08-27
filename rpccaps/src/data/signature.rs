@@ -1,43 +1,30 @@
 use std::convert::TryFrom;
 
-use signature::{Signer,Verifier};
-use signatory::public_key::PublicKeyed;
+use signature;
+use serde::{Serialize,Deserialize};
 
 use super::bytes;
 
-pub use signatory::ed25519::{Seed as PrivateKey, PublicKey, Signature};
 pub use signature::Error;
+pub use ed25519::Signature;
 
 
-pub trait SignMethod {
-    type Signer: Signer<Signature>;
-    type Verifier: Verifier<Signature>;
+pub trait Verifier : signature::Verifier<Signature>+PartialEq+Clone+bytes::Bytes {
 
-    fn signer(key: &PrivateKey) -> Self::Signer;
-    fn verifier(key: &PublicKey) -> Self::Verifier;
-    fn public_key(signer: &Self::Signer) -> Option<PublicKey>;
+}
+pub trait Signer : signature::Signer<Signature> {}
+
+
+pub trait SignMethod : Clone {
+    type Signer: Signer;
+    type Verifier: Verifier;
+
+    fn generate() -> Result<Self::Signer,Error>;
+    fn signer(secret: &[u8]) -> Result<Self::Signer, Error>;
+    fn verifier(signer: &Self::Signer) -> Result<&Self::Verifier, Error>;
 }
 
 
-impl bytes::Bytes for PrivateKey {
-    fn from_bytes<B: AsRef<[u8]>>(b: B) -> Option<Self> {
-        PrivateKey::from_bytes(b)
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        self.as_secret_slice()
-    }
-}
-
-impl bytes::Bytes for PublicKey {
-    fn from_bytes<B: AsRef<[u8]>>(b: B) -> Option<Self> {
-        PublicKey::from_bytes(b)
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        self.as_ref()
-    }
-}
 
 impl bytes::Bytes for Signature {
     fn from_bytes<B: AsRef<[u8]>>(b: B) -> Option<Self> {
@@ -50,30 +37,45 @@ impl bytes::Bytes for Signature {
 }
 
 
-mod sodium {
+pub mod dalek {
+    pub use ed25519_dalek::{Keypair,PublicKey};
+    use rand_core::{OsRng};
     use super::*;
-    use signatory_sodiumoxide::{Ed25519Signer, Ed25519Verifier};
 
-    pub struct Sodium;
+    #[derive(Serialize,Deserialize,Clone)]
+    pub struct Dalek;
 
-    impl super::SignMethod for Sodium {
-        type Signer = Ed25519Signer;
-        type Verifier = Ed25519Verifier;
+    impl super::Signer for Keypair {}
+    impl super::Verifier for PublicKey {}
 
-        fn signer(key: &PrivateKey) -> Self::Signer {
-            Self::Signer::from(key)
+    impl super::SignMethod for Dalek {
+        type Signer = Keypair;
+        type Verifier = PublicKey;
+
+        fn generate() -> Result<Self::Signer, Error> {
+            Ok(Keypair::generate(&mut OsRng))
         }
 
-        fn verifier(key: &PublicKey) -> Self::Verifier {
-            Self::Verifier::from(key)
+        fn signer(secret: &[u8]) -> Result<Self::Signer, Error> {
+            Keypair::from_bytes(secret)
         }
 
-        fn public_key(signer: &Self::Signer) -> Option<PublicKey> {
-            signer.public_key().ok()
+        fn verifier(signer: &Self::Signer) -> Result<&Self::Verifier, Error> {
+            Ok(&signer.public)
+        }
+    }
+
+    impl bytes::Bytes for PublicKey {
+        fn from_bytes<B: AsRef<[u8]>>(b: B) -> Option<Self> {
+            PublicKey::from_bytes(b.as_ref()).ok()
+        }
+
+        fn as_bytes(&self) -> &[u8] {
+            (self as &PublicKey).as_bytes()
         }
     }
 }
 
-pub use sodium::Sodium;
+pub use dalek::Dalek;
 
 

@@ -31,38 +31,46 @@ impl fmt::Display for Error {
 /// It implements various utilities to sign and validate it.
 #[derive(Serialize,Deserialize,PartialEq,Clone)]
 pub struct Reference<Id,Sign>
-    where Id: Clone
+    where Id: Clone, Sign: sign::SignMethod
 {
     id: Id,
     #[serde(with="bytes")]
-    issuer: sign::PublicKey,
+    issuer: Sign::Verifier,
     max_share: u32,
-    certs: Vec<Certificate>,
+    certs: Vec<Certificate<Sign>>,
     phantom: PhantomData<Sign>,
 }
 
 
 #[derive(Serialize,Deserialize,PartialEq,Clone)]
-pub struct Certificate {
-    pub auth: Authorization,
+pub struct Certificate<Sign>
+    where Sign: sign::SignMethod
+{
+    #[serde(bound="Sign: sign::SignMethod")]
+    pub auth: Authorization<Sign>,
     #[serde(with="bytes")]
     pub signature: sign::Signature,
 }
 
 
 #[derive(Serialize,Deserialize,PartialEq,Clone)]
-pub struct Authorization
+pub struct Authorization<Sign>
+    where Sign: sign::SignMethod
 {
     pub capability: Capability,
     #[serde(with="bytes")]
-    pub subject: sign::PublicKey,
+    pub subject: Sign::Verifier,
 }
 
 
 #[derive(Serialize,Deserialize,PartialEq,Clone)]
-pub enum CertData<Id> {
-    Reference(Authorization, Id, #[serde(with="bytes")] sign::PublicKey, u32),
-    Signature(Authorization, #[serde(with="bytes")] sign::Signature),
+pub enum CertData<Id, Sign>
+    where Sign: sign::SignMethod
+{
+    #[serde(bound(serialize="Sign: sign::SignMethod, Id: Serialize"))]
+    Reference(Authorization<Sign>, Id, #[serde(with="bytes")] Sign::Verifier, u32),
+    #[serde(bound(serialize="Sign: sign::SignMethod, Id: Serialize"))]
+    Signature(Authorization<Sign>, #[serde(with="bytes")] sign::Signature),
 }
 
 
@@ -70,13 +78,13 @@ impl<Id,Sign> Reference<Id,Sign>
     where Id: Clone+Serialize, Sign: sign::SignMethod
 {
     /// Create a new reference, signing it with the provided keys.
-    pub fn new(id: Id, issuer: &Sign::Signer, max_share: u32, auth: Authorization)
+    pub fn new(id: Id, issuer: &Sign::Signer, max_share: u32, auth: Authorization<Sign>)
         -> Result<Self,Error>
     {
-        match Sign::public_key(issuer) {
-            Some(issuer_pk) => {
+        match Sign::verifier(&issuer) {
+            Ok(verifier) => {
                 let mut reference = Self {
-                    id, issuer: issuer_pk, max_share,
+                    id, issuer: verifier.clone(), max_share,
                     certs: Vec::with_capacity(1),
                     phantom: PhantomData
                 };
@@ -92,23 +100,23 @@ impl<Id,Sign> Reference<Id,Sign>
     }
 
     /// Return issuer of the reference.
-    pub fn issuer(&self) -> &sign::PublicKey {
+    pub fn issuer(&self) -> &Sign::Verifier {
         &self.issuer
     }
 
     /// Return authorizations of the reference.
-    pub fn certs(&self) -> &Vec<Certificate> {
+    pub fn certs(&self) -> &Vec<Certificate<Sign>> {
         &self.certs
     }
 
     /// Return cert data for provided signer, authorization and last
     /// certificate. Return Error on data validation fails.
-    fn cert_data(&self, issuer: &sign::PublicKey, auth: Authorization,
-                 last: Option<&Certificate>)
-        -> Result<CertData<Id>,Error>
+    fn cert_data(&self, issuer: &Sign::Verifier, auth: Authorization<Sign>,
+                 last: Option<&Certificate<Sign>>)
+        -> Result<CertData<Id,Sign>,Error>
     {
        match last {
-            None => Ok(CertData::Reference(auth, self.id.clone(), self.issuer, self.max_share)),
+            None => Ok(CertData::Reference(auth, self.id.clone(), self.issuer.clone(), self.max_share)),
             Some(last) => {
                 // test: auth must be subset of last auth
                 if !auth.capability.is_subset(&last.auth.capability) {
@@ -124,12 +132,12 @@ impl<Id,Sign> Reference<Id,Sign>
     }
 
     /// Add a new signature to the reference.
-    pub fn sign(&mut self, issuer: &Sign::Signer, auth: Authorization) -> Result<(), Error> {
+    pub fn sign(&mut self, issuer: &Sign::Signer, auth: Authorization<Sign>) -> Result<(), Error> {
         if self.certs.len() >= (self.max_share as usize)+1 {
             return Err(Error::MaxShare);
         }
 
-        let cert_data = self.cert_data(&Sign::public_key(&issuer).unwrap(), auth.clone(),
+        let cert_data = self.cert_data(&Sign::verifier(&issuer).unwrap(), auth.clone(),
                                        self.certs.last());
         match cert_data {
             Ok(cert_data) => bincode::serialize(&cert_data)
@@ -145,7 +153,7 @@ impl<Id,Sign> Reference<Id,Sign>
     }
 
     /// Create a new reference with authorizations' chain up to subject.
-    pub fn subset(&self, subject: &sign::PublicKey) -> Option<Self> {
+    pub fn subset(&self, subject: &Sign::Verifier) -> Option<Self> {
         self.certs.iter().enumerate().find(|(_i,c)| subject == &c.auth.subject)
             .and_then(|(i, _auth)| Some(Self {
                 id: self.id.clone(),
@@ -158,10 +166,10 @@ impl<Id,Sign> Reference<Id,Sign>
 
     /// Shorten the authorizations' chain for the provided subject, signing it in
     /// a new reference.
-    pub fn shrink(&self, signer: &Sign::Signer, subject: &sign::PublicKey) -> Option<Self> {
+    pub fn shrink(&self, signer: &Sign::Signer, subject: &Sign::Verifier) -> Option<Self> {
         match self.certs.iter().find(|cert| subject == &cert.auth.subject) {
-            Some(cert) => Sign::public_key(signer)
-                .and_then(|k| self.subset(&k))
+            Some(cert) => Sign::verifier(signer).ok()
+                .and_then(|verifier| self.subset(verifier))
                 .and_then(|mut reference| {
                     reference.sign(signer, cert.auth.clone()).ok().and(Some(reference))
                 }),
@@ -170,13 +178,12 @@ impl<Id,Sign> Reference<Id,Sign>
     }
 }
 
-
 /// Validation is tested agains't last user's public-key
 impl<Id,Sign> Validate for Reference<Id,Sign>
     where Id: Clone+Serialize, Sign: sign::SignMethod
 {
     type Error = Error;
-    type Context = sign::PublicKey;
+    type Context = Sign::Verifier;
 
     fn validate(&self, subject: &Self::Context) -> Result<(),Self::Error> {
         // Max share count
@@ -196,7 +203,7 @@ impl<Id,Sign> Validate for Reference<Id,Sign>
         // Check certificates
         let mut buf = Vec::new();
         let mut issuer = &self.issuer;
-        let mut last: Option<&Certificate> = None;
+        let mut last: Option<&Certificate<Sign>> = None;
 
         for cert in self.certs.iter() {
             match self.cert_data(issuer, cert.auth.clone(), last) {
@@ -206,8 +213,7 @@ impl<Id,Sign> Validate for Reference<Id,Sign>
                         return Err(Error::Serialize(err))
                     }
 
-                    let verifier = Sign::verifier(issuer);
-                    if let Err(err) = verifier.verify(&buf, &cert.signature) {
+                    if let Err(err) = issuer.verify(&buf, &cert.signature) {
                         return Err(Error::Signature(err))
                     }
 
@@ -222,24 +228,29 @@ impl<Id,Sign> Validate for Reference<Id,Sign>
 }
 
 
-impl Authorization {
-    pub fn new(capability: Capability, subject: sign::PublicKey) -> Self {
+
+impl<Sign> Authorization<Sign>
+    where Sign: sign::SignMethod
+{
+    pub fn new(capability: Capability, subject: Sign::Verifier) -> Self {
         Self { capability, subject }
     }
 }
 
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use std::ops::{Deref,DerefMut};
+
     use crate::expect;
-    use super::super::signature::{Sodium,SignMethod};
+    use super::super::signature::{Dalek,SignMethod};
     use super::*;
 
-    struct TestReference<Sign: SignMethod> {
-        signers: Vec<Sign::Signer>,
-        public_keys: Vec<sign::PublicKey>,
-        reference: Reference<u64,Sign>,
+
+    pub struct TestReference<Sign: SignMethod> {
+        pub signers: Vec<Sign::Signer>,
+        pub public_keys: Vec<Sign::Verifier>,
+        pub reference: Reference<u64,Sign>,
     }
 
     impl<Sign: SignMethod> Deref for TestReference<Sign> {
@@ -256,22 +267,22 @@ mod tests {
         }
     }
 
-    impl<Sign: SignMethod> TestReference<Sign> {
-        fn new(max_share: u32, cap: Capability) -> Self {
-            let private_keys = (0..10).map(|_| sign::PrivateKey::generate()).collect::<Vec<_>>();
-            let signers = private_keys.iter().map(|k| Sign::signer(k)).collect::<Vec<_>>();
-            let public_keys = signers.iter()
-                .map(|s| Sign::public_key(s).expect("error getting public key from signer"))
+    impl TestReference<Dalek> {
+        pub fn new(max_share: u32, cap: Capability) -> Self {
+            let signers = (0..10)
+                .map(|_| Dalek::generate().unwrap())
+                .collect::<Vec<_>>();
+            let public_keys = signers.iter().map(|s| s.public)
                 .collect::<Vec<_>>();
 
             let auth = Authorization::new(cap, public_keys[1].clone());
-            let reference = Reference::<u64,Sign>::new(0u64, &signers[0], max_share, auth)
+            let reference = Reference::<u64,Dalek>::new(0u64, &signers[0], max_share, auth)
                                 .expect("can not create reference");
 
             Self { signers, public_keys, reference }
         }
 
-        fn sign(&mut self, signer: usize, capability: Capability) -> Result<(),Error>
+        pub fn sign(&mut self, signer: usize, capability: Capability) -> Result<(),Error>
         {
             if signer+1 >= self.signers.len() {
                 panic!("signer invalid")
@@ -281,7 +292,7 @@ mod tests {
             self.reference.sign(&self.signers[signer], auth)
         }
 
-        fn sign_n(&mut self, last: Option<usize>, mut capability: Capability) -> Result<(), (usize,Error)> {
+        pub fn sign_n(&mut self, last: Option<usize>, mut capability: Capability) -> Result<(), (usize,Error)> {
             let last = last.unwrap_or_else(|| self.signers.len()-1);
             for i in 1..last {
                 capability.actions >>= 1;
@@ -292,7 +303,7 @@ mod tests {
             Ok(())
         }
 
-        fn validate(&self, subject: Option<usize>) -> Result<(), Error> {
+        pub fn validate(&self, subject: Option<usize>) -> Result<(), Error> {
             let subject = subject.unwrap_or_else(|| self.public_keys.len()-1);
             self.reference.validate(&self.public_keys[subject])
         }
@@ -301,7 +312,7 @@ mod tests {
     #[test]
     fn test_sign_ok() {
         let cap = Capability::new(0b11111111, 0b11111111);
-        let mut test = TestReference::<Sodium>::new(64, cap.clone());
+        let mut test = TestReference::<Dalek>::new(64, cap.clone());
 
         expect!(test.sign_n(None, cap), Ok(_));
         expect!(test.validate(None), Ok(_));
@@ -310,7 +321,7 @@ mod tests {
     #[test]
     fn test_sign_err() {
         let cap = Capability::new(0b11111111, 0b00000000);
-        let mut test = TestReference::<Sodium>::new(64, cap.clone());
+        let mut test = TestReference::<Dalek>::new(64, cap.clone());
 
         expect!(test.sign(1, cap.clone()), Err(Error::Capability));
         expect!(test.sign(2, cap.clone()), Err(Error::Capability));
@@ -319,7 +330,7 @@ mod tests {
     #[test]
     fn test_sign_max_share() {
         let cap = Capability::new(0b11111111, 0b11111111);
-        let mut test = TestReference::<Sodium>::new(0, cap.clone());
+        let mut test = TestReference::<Dalek>::new(0, cap.clone());
 
         expect!(test.sign_n(None, cap), Err((_, Error::MaxShare)));
         // TODO expect!(test.validate(None), Ok(_));
@@ -328,7 +339,7 @@ mod tests {
     #[test]
     fn test_validate_err_auth() {
         let cap = Capability::new(0b11111111, 0b11111111);
-        let mut test = TestReference::<Sodium>::new(64, cap.clone());
+        let mut test = TestReference::<Dalek>::new(64, cap.clone());
 
         expect!(test.sign_n(None, cap), Ok(_));
         expect!(test.validate(None), Ok(_));
@@ -343,7 +354,7 @@ mod tests {
     #[test]
     fn test_validate_err_subject() {
         let cap = Capability::new(0b11111111, 0b00001111);
-        let test = TestReference::<Sodium>::new(64, cap.clone());
+        let test = TestReference::<Dalek>::new(64, cap.clone());
 
         expect!(test.validate(Some(2)), Err(Error::Subject));
     }
@@ -351,7 +362,7 @@ mod tests {
     #[test]
     fn test_validate_err_cap() {
         let cap = Capability::new(0b11111111, 0b00001111);
-        let mut test = TestReference::<Sodium>::new(64, cap.clone());
+        let mut test = TestReference::<Dalek>::new(64, cap.clone());
 
         test.sign(1, cap.subset(cap.actions >> 1, cap.share)).unwrap();
         test.reference.certs.get_mut(1).unwrap().auth.capability.actions = cap.actions;
@@ -361,7 +372,7 @@ mod tests {
     #[test]
     fn test_validate_err_sign() {
         let cap = Capability::new(0b11111111, 0b00001111);
-        let mut test = TestReference::<Sodium>::new(64, cap.clone());
+        let mut test = TestReference::<Dalek>::new(64, cap.clone());
 
         test.sign(1, cap.subset(cap.actions >> 1, cap.share)).unwrap();
 
@@ -375,7 +386,7 @@ mod tests {
     #[test]
     fn test_subset() {
         let cap = Capability::new(0b11111111, 0b11111111);
-        let mut test = TestReference::<Sodium>::new(64, cap.clone());
+        let mut test = TestReference::<Dalek>::new(64, cap.clone());
 
         test.sign_n(None, cap).unwrap();
 
@@ -391,7 +402,7 @@ mod tests {
     #[test]
     fn test_shrink() {
         let cap = Capability::new(0b11111111, 0b11111111);
-        let mut test = TestReference::<Sodium>::new(64, cap.clone());
+        let mut test = TestReference::<Dalek>::new(64, cap.clone());
 
         test.sign_n(None, cap).unwrap();
 

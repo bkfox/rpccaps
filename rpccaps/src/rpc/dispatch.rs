@@ -3,6 +3,10 @@ use std::sync::{RwLock, atomic::{AtomicU32, Ordering}};
 use std::pin::Pin;
 
 use futures::prelude::*;
+use serde::Deserialize;
+use tokio::io::{AsyncRead,AsyncWrite};
+
+use super::codec::{BincodeCodec,Decoder,FramedRead};
 
 
 pub type HandlerFn<D> = Box<dyn Send+Sync+Unpin+Fn(D) -> Pin<Box<dyn Future<Output=()>>>>;
@@ -21,6 +25,7 @@ pub enum Error {
     Internal,
     KeyError,
     TooManyTasks,
+    Codec,
 }
 
 
@@ -57,7 +62,7 @@ impl<Id,D> Dispatch<Id,D>
         self.handlers.write().unwrap().remove(&id);
     }
 
-    async fn dispatch(&self, id: Id, data: D) -> Result<(), Error> {
+    pub async fn dispatch(&self, id: Id, data: D) -> Result<(), Error> {
         if let Some(max_count) = self.max_count {
             if self.count.load(Ordering::Relaxed) >= max_count {
                 return Err(Error::TooManyTasks);
@@ -91,21 +96,44 @@ impl<Id,D> Dispatch<Id,D>
 }
 
 
+
+impl<Id,S,R> Dispatch<Id,(S,R)>
+    where for<'de> Id: std::cmp::Ord+Send+Sync+Deserialize<'de>,
+          S: 'static+AsyncWrite+Sync+Send+Unpin,
+          R: 'static+AsyncRead+Sync+Send+Unpin,
+{
+    /// Dispatch ``(sender, receiver)`` to service. Uses provided
+    /// codec ``C`` to decode handler's Id.
+    pub async fn dispatch_stream<C>(&self, (sender, receiver): (S,R))
+            -> Result<(), Error>
+        where C: Default+Decoder<Item=Id>
+    {
+        let mut codec = FramedRead::new(receiver, C::default());
+        let id = match codec.next().await {
+            Some(Ok(id)) => id,
+            _ => return Err(Error::Codec),
+        };
+
+        let receiver = codec.into_inner();
+        self.dispatch(id, (sender, receiver)).await
+    }
+}
+
+
 #[cfg(test)]
-mod test {
+pub mod tests {
     use std::sync::{Arc,RwLock};
     use futures::executor::LocalPool;
 
     use super::*;
 
-
-    struct TestDispatch {
+    pub struct TestDispatch {
         pub result: Arc<RwLock<i64>>,
         pub dispatch: Dispatch<&'static str,(i64,i64)>,
     }
 
     impl TestDispatch {
-        fn new(max_count: Option<u32>) -> Self {
+        pub fn new(max_count: Option<u32>) -> Self {
             let dispatch = Dispatch::new(max_count);
             let result = Arc::new(RwLock::new(0i64));
 
@@ -139,7 +167,7 @@ mod test {
             Self { result, dispatch }
         }
 
-        fn result(&self) -> i64 {
+        pub fn result(&self) -> i64 {
             *self.result.read().unwrap()
         }
     }
@@ -180,6 +208,10 @@ mod test {
                        Error::KeyError);
         })
     }
+
+    // TODO:
+    // - test max_count
+    // - test dispatch_transport
 
     /*
     #[test]

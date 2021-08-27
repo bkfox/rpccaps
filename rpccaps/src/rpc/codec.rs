@@ -4,7 +4,7 @@ use bincode;
 use bytes::BytesMut;
 use serde::{Deserialize,Serialize};
 use tokio::io::{AsyncRead,AsyncWrite};
-use tokio_util::codec::{Decoder,Encoder,FramedRead,FramedWrite};
+pub use tokio_util::codec::{Decoder,Encoder,FramedRead,FramedWrite};
 
 
 /// Implement tokio codec for Bincode.
@@ -34,7 +34,7 @@ impl<T> BincodeCodec<T>
 
 impl<T> Default for BincodeCodec<T> {
     fn default() -> Self {
-        Self(PhantomData)
+        Self::new()
     }
 }
 
