@@ -2,6 +2,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 
 use bytes::BytesMut;
+use futures::io::{AsyncRead,AsyncWrite};
 use futures::prelude::*;
 use futures::task::{Context,Poll};
 
@@ -10,7 +11,6 @@ use serde::{Deserialize,Serialize};
 pub use tokio_util::codec::{Decoder,Encoder,FramedWrite};
 
 
-use futures::io::{AsyncRead, AsyncWrite};
 
 /// FramedRead compatible with futures::io's AsyncRead/Write
 pub struct FramedRead<R,C>
@@ -41,8 +41,8 @@ impl<R,C> FramedRead<R,C>
 }
 
 impl<R,C> Stream for FramedRead<R,C>
-    where R: 'static+AsyncRead+Sync+Send+Unpin,
-          C: Decoder+Unpin
+    where R: AsyncRead,
+          C: Decoder+Unpin,
 {
     type Item = C::Item;
 
