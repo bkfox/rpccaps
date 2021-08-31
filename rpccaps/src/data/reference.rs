@@ -109,6 +109,11 @@ impl<Id,Sign> Reference<Id,Sign>
         &self.certs
     }
 
+    /// Return last certificate
+    pub fn last(&self) -> Option<&Certificate<Sign>> {
+        self.certs.last()
+    }
+
     /// Return cert data for provided signer, authorization and last
     /// certificate. Return Error on data validation fails.
     fn cert_data(&self, issuer: &Sign::Verifier, auth: Authorization<Sign>,

@@ -1,10 +1,69 @@
 use std::marker::PhantomData;
+use std::pin::Pin;
+
+use bytes::BytesMut;
+use futures::prelude::*;
+use futures::task::{Context,Poll};
 
 use bincode;
-use bytes::BytesMut;
 use serde::{Deserialize,Serialize};
-use tokio::io::{AsyncRead,AsyncWrite};
-pub use tokio_util::codec::{Decoder,Encoder,FramedRead,FramedWrite};
+pub use tokio_util::codec::{Decoder,Encoder,FramedWrite};
+
+
+use futures::io::{AsyncRead, AsyncWrite};
+
+/// FramedRead compatible with futures::io's AsyncRead/Write
+pub struct FramedRead<R,C>
+{
+    reader: R,
+    decoder: C,
+    buffer: BytesMut,
+}
+
+impl<R,C> FramedRead<R,C>
+{
+    pub fn new(reader: R, decoder: C) -> Self {
+        Self::with_capacity(reader, decoder, 128)
+    }
+
+    pub fn with_capacity(&self, reader: R, decoder: C, capacity: usize) -> Self {
+        let mut buffer = BytesMut::with_capacity(capacity);
+        Self { reader, decoder, buffer: BytesMut::new() }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.buffer.capacity
+    }
+
+    pub fn into_inner(self) -> R {
+        self.reader
+    }
+}
+
+impl<R,C> Stream for FramedRead<R,C>
+    where R: 'static+AsyncRead+Sync+Send+Unpin,
+          C: Decoder+Unpin
+{
+    type Item = C::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>>
+    {
+        let mut this = self.as_mut();
+        this.buffer.resize(this.buffer.capacity);
+
+        match Pin::new(&mut this.reader).poll_read(cx, &this.buffer) {
+            Poll::Ready(Ok(size)) => match this.codec.decode(&this.buffer[..size]) {
+                Ok(Some(item)) => Poll::Ready(Some(item)),
+                Ok(None) => Poll::Pending,
+                Err(_) => Poll::Ready(None),
+            },
+            Poll::Ready(Err(_)) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+
 
 
 /// Implement tokio codec for Bincode.

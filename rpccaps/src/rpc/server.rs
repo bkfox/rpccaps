@@ -1,82 +1,151 @@
-use std::sync::{Arc,RwLock};
-use std::pin::Pin;
-use futures::prelude::*;
-use tokio::io::{AsyncRead,AsyncWrite};
-use tokio_util::codec::{Decoder,Encoder,FramedRead,FramedWrite};
+use std::{
+    fs::File,
+    io::Read,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
+    sync::{Arc,RwLock},
+    pin::Pin
+};
 
+
+use futures::prelude::*;
+use tokio::{
+    io::{AsyncRead,AsyncWrite},
+    runtime::Runtime
+};
 use serde::{Deserialize,Serialize};
+
+use rcgen::{self, generate_simple_self_signed};
+use quinn::{self, Endpoint, ServerConfigBuilder, ClientConfigBuilder};
 
 use super::codec::BincodeCodec;
 use super::dispatch::{Dispatch,Error,HandlerFn};
-use super::service::Service;
 
 
-type ServiceBuilder<S> = Box<dyn Send+Sync+Unpin+Fn() -> S>;
 
+#[derive(Serialize,Deserialize)]
 struct ServerConfig {
     dispatch_max: Option<u32>,
-    key_file: String,
+    cert: Option<rcgen::Certificate>,
+    cert_file: String,
+    cert_subject_names: Vec<String>,
 }
 
 
+
+pub type IncomingStreamItem = (quinn::SendStream, quinn::RecvStream);
+
 /// Server class handling dispatching to services from incoming transport stream.
-/// It uses BincodeCodec for messages de-serialization and Quic for communication.
-struct Server<Id,Context,T,S,R>
+/// It uses Bincode for messages de-serialization and Quic for communication.
+struct Server<Id>
     where Id: std::cmp::Ord,
-          T: Stream<Item=(S,R)>,
-          S: AsyncWrite+Send+Unpin,
-          R: AsyncRead+Send+Unpin,
 {
-    incoming: T,
-    pub dispatch: Arc<Dispatch<Id,(S,R)>>,
-    pub context: Arc<RwLock<Context>>,
+    // FIXME: RecvStream/SendStream
+    pub dispatch: Arc<Dispatch<Id,IncomingStreamItem>>,
+    pub connection: Option<quinn::Connection>,
     config: ServerConfig,
 }
 
-impl<Id,Context,T,S,R> Server<Id,Context,T,S,R>
-    where for<'de> Id: std::cmp::Ord+Send+Sync+Clone+Deserialize<'de>,
-          T: Stream<Item=(S,R)>,
-          S: 'static+AsyncWrite+Sync+Send+Unpin,
-          R: 'static+AsyncRead+Sync+Send+Unpin,
+
+
+impl ServerConfig {
+    /*fn load_cert(&mut self, cert_file: &str) -> Result<Vec<u8>,()> {
+        let mut cert_data = Vec::new();
+        let mut file = File::open(cert_file).or(Err(()))?;
+        file.read_to_end(&mut cert_data).or(Err(()))?;
+        Ok(cert_data)
+    }*/
+
+    pub fn load(&mut self) -> Result<(), ()> {
+        if self.cert.is_none() {
+            let cert = generate_simple_self_signed(self.cert_subject_names.clone())
+                            .or(Err(()))?;
+            self.cert = cert.ok();
+        }
+
+        Ok(())
+    }
+}
+
+
+impl<Id> Server<Id>
+    where for<'de> Id: 'static+std::cmp::Ord+Send+Sync+Clone+Deserialize<'de>,
 {
     /// Create new server.
-    pub fn new(incoming: T, context: Context, config: ServerConfig) -> Self {
+    pub fn new(config: ServerConfig) -> Self {
         Self {
-            incoming: incoming,
             dispatch: Arc::new(Dispatch::new(config.dispatch_max)),
-            context: Arc::new(RwLock::new(context)),
+            connection: None,
             config: config,
         }
     }
 
-    // TODO: stop()
-
-    /// Register a service using factory function.
-    pub fn register<Sv>(&self, id: Id, builder: ServiceBuilder<Sv>, once: bool)
-            -> Result<(), Error>
-        where Sv: 'static+Service,
-              for <'de> Sv::Request: Deserialize<'de>, Sv::Response: Serialize
+    /// Create endpoint binding to provided address.
+    pub fn endpoint(&mut self, address: &SocketAddr)
+            -> Result<(quinn::Endpoint, quinn::Incoming), ()>
     {
-        let handler: HandlerFn<(S,R)> = Box::new(move |stream| {
-            let encoder = BincodeCodec::new();
-            let decoder = BincodeCodec::new();
-            builder().serve_stream(stream, encoder, decoder)
-        });
-        self.dispatch.register(id, handler, once)
+        self.config.load()?;
+
+        let mut endpoint = Endpoint::builder();
+        let mut server_config = ServerConfigBuilder::default();
+        let cert = self.config.cert.unwrap();
+        let key = quinn::PrivateKey::from_der(&cert.serialize_private_key_der()).unwrap();
+        let cert = quinn::Certificate::from_der(&cert.serialize_der().unwrap()).unwrap();
+        let cert_chain = quinn::CertificateChain::from_certs(vec![cert.clone()]);
+
+        server_config.certificate(cert_chain, key).unwrap();
+        endpoint.listen(server_config.build());
+
+        let mut client_config = ClientConfigBuilder::default();
+        client_config.add_certificate_authority(cert).unwrap();
+        endpoint.default_client_config(client_config.build());
+
+        endpoint.bind(address).or(Err(()))
     }
 
-    pub fn unregister(&self, id: &Id) {
-        self.dispatch.unregister(id)
+    async fn run(&mut self, runtime: &Arc<Runtime>, address: &SocketAddr) -> Result<(),()> {
+        let (mut endpoint, mut incoming) = self.endpoint(address)?;
+
+        while let Some(connecting) = incoming.next().await {
+            let new_conn = connecting.await.unwrap();
+            let (dispatch, runtime) = (self.dispatch.clone(), runtime.clone());
+            let connection = new_conn.connection;
+
+            let handle = new_conn.bi_streams
+                .take_while(|x| future::ready(x.is_ok()))
+                .for_each(async move |stream| {
+                    runtime.spawn(async {
+                        let stream = stream.unwrap();
+                        let data = (stream.0, stream.1, connection.clone());
+                        dispatch.dispatch_stream::<BincodeCodec<Id>>(data).await
+                                .or(Err(()))
+                    });
+                });
+            runtime.spawn(handle);
+        }
+        Ok(())
     }
 
-    /// Dispatch stream to service
-    pub async fn dispatch_stream(&self, stream: (S,R)) -> Result<(), Error> {
-        self.dispatch.dispatch_stream::<BincodeCodec<Id>>(stream).await
-    }
+    // TODO: run(), stop()
 }
 
-// #[cfg(feature="network")]
 
+/*#[cfg(feature="network")]
+pub mod quic {
+    use quinn::{self, Certificate, Connection, ConnectionError, ReadError, WriteError};
+    use rand::{self, RngCore};
+    use tokio::runtime::Builder;
+
+    pub struct QuicServer<Id> {
+        pub connection: Connection,
+        cert_secret: Vec<u8>,
+    }
+
+    impl<Id> QuicServer<Id> {
+        fn configure_listener(&self) -> (quinn::ServerConfig, Vec<u8>) {
+            
+        }
+    }
+}*/
 
 
 #[cfg(test)]

@@ -3,10 +3,11 @@ use std::sync::{RwLock, atomic::{AtomicU32, Ordering}};
 use std::pin::Pin;
 
 use futures::prelude::*;
-use serde::Deserialize;
-use tokio::io::{AsyncRead,AsyncWrite};
+use serde::{Deserialize,Serialize};
+use futures::io::{AsyncRead,AsyncWrite};
 
 use super::codec::{BincodeCodec,Decoder,FramedRead};
+use super::service::Service;
 
 
 pub type HandlerFn<D> = Box<dyn Send+Sync+Unpin+Fn(D) -> Pin<Box<dyn Future<Output=()>>>>;
@@ -26,6 +27,7 @@ pub enum Error {
     KeyError,
     TooManyTasks,
     Codec,
+    File,
 }
 
 
@@ -46,7 +48,7 @@ impl<Id,D> Dispatch<Id,D>
         Self { handlers: RwLock::new(BTreeMap::new()), count: AtomicU32::new(0), max_count }
     }
 
-    pub fn register(&self, id: Id, func: HandlerFn<D>, once: bool) -> Result<(), Error>
+    pub fn add(&self, id: Id, func: HandlerFn<D>, once: bool) -> Result<(), Error>
     {
         let handler = Handler { func, once };
         match self.handlers.write() {
@@ -58,7 +60,7 @@ impl<Id,D> Dispatch<Id,D>
         }
     }
 
-    pub fn unregister(&self, id: &Id) {
+    pub fn remove(&self, id: &Id) {
         self.handlers.write().unwrap().remove(&id);
     }
 
@@ -86,7 +88,7 @@ impl<Id,D> Dispatch<Id,D>
         fut.await;
 
         if once {
-            self.unregister(&id);
+            self.remove(&id);
         }
 
         // FIXME: handling task cancelation, count may not be substracted
@@ -97,14 +99,34 @@ impl<Id,D> Dispatch<Id,D>
 
 
 
-impl<Id,S,R> Dispatch<Id,(S,R)>
+type ServiceBuilder<S> = Box<dyn Send+Sync+Unpin+Fn() -> S>;
+
+/// Implement Dispatch with ``(AsyncWrite, AsyncRead)`` as ``Data``.
+impl<Id,S,R,D> Dispatch<Id,(S,R,D)>
     where for<'de> Id: std::cmp::Ord+Send+Sync+Deserialize<'de>,
           S: 'static+AsyncWrite+Sync+Send+Unpin,
           R: 'static+AsyncRead+Sync+Send+Unpin,
+          D: Sync+Send,
 {
+    /// Register a service using factory function.
+    /// FIXME: generic codec
+    pub fn add_builder<Sv>(&self, id: Id, builder: ServiceBuilder<Sv>, once: bool)
+            -> Result<(), Error>
+        where Sv: 'static+Service,
+              for <'de> Sv::Request: Deserialize<'de>, Sv::Response: Serialize
+    {
+        let handler: HandlerFn<(S,R,D)> = Box::new(move |(sender, receiver, data)| {
+            let encoder = BincodeCodec::new();
+            let decoder = BincodeCodec::new();
+            builder(data).serve_stream((sender, receiver), encoder, decoder)
+        });
+        self.add(id, handler, once)
+    }
+
+
     /// Dispatch ``(sender, receiver)`` to service. Uses provided
     /// codec ``C`` to decode handler's Id.
-    pub async fn dispatch_stream<C>(&self, (sender, receiver): (S,R))
+    pub async fn dispatch_stream<C>(&self, (sender, receiver, data): (S,R,D))
             -> Result<(), Error>
         where C: Default+Decoder<Item=Id>
     {
@@ -115,8 +137,9 @@ impl<Id,S,R> Dispatch<Id,(S,R)>
         };
 
         let receiver = codec.into_inner();
-        self.dispatch(id, (sender, receiver)).await
+        self.dispatch(id, (sender, receiver, data)).await
     }
+
 }
 
 
@@ -138,7 +161,7 @@ pub mod tests {
             let result = Arc::new(RwLock::new(0i64));
 
             let res = result.clone();
-            dispatch.register("add", Box::new(move |(a,b)| {
+            dispatch.add("add", Box::new(move |(a,b)| {
                 let res = res.clone();
                 Box::pin(async move {
                     let mut result = res.write().unwrap();
@@ -147,7 +170,7 @@ pub mod tests {
             }), false).unwrap();
 
             let res = result.clone();
-            dispatch.register("sub", Box::new(move |(a,b)| {
+            dispatch.add("sub", Box::new(move |(a,b)| {
                 let res = res.clone();
                 Box::pin(async move {
                     let mut result = res.write().unwrap();
@@ -156,7 +179,7 @@ pub mod tests {
             }), false).unwrap();
 
             let res = result.clone();
-            dispatch.register("add_once", Box::new(move |(a,b)| {
+            dispatch.add("add_once", Box::new(move |(a,b)| {
                 let res = res.clone();
                 Box::pin(async move {
                     let mut result = res.write().unwrap();

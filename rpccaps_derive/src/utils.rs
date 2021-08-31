@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::iter::FromIterator;
 use std::ops::{Deref,DerefMut};
 
 use quote::ToTokens;

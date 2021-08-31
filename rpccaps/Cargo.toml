@@ -7,7 +7,7 @@ description = "Capabilities based rpc system."
 
 [features]
 default = ["network"]
-network = ["quinn"]
+network = ["quinn", "rcgen"]
 plugins = []
 
 [dependencies]
@@ -25,11 +25,12 @@ signature={ version="1.2", features = ["std"] }
 ed25519="1.2"
 ed25519-dalek="1.0.1"
 
-futures="0.3"
+futures="0.3.17"
 futures-util = "0.3"
 async-trait = "0.1.41"
-tokio= { version="0.3", features=["io-util"] }
-tokio-util = { version="0.5.0", features=["codec"] }
+tokio = { version="1.10", features=["io-util", "rt"] }
+tokio-util = { version="0.6", features=["codec"] }
 
+rcgen = { version = "0.8", optional = true }
 quinn = { version = "0.6.1", optional = true }
 
