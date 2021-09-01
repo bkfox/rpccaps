@@ -15,3 +15,14 @@ pub use service::Service;
 pub use transport::Transport;
 
 
+#[derive(PartialEq,Debug)]
+pub enum Error {
+    Internal,
+    KeyError,
+    TooManyTasks,
+    Codec,
+    File,
+    Io,
+}
+
+

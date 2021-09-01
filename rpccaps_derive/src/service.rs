@@ -63,8 +63,8 @@ impl<'a> Service<'a> {
     }
 
     fn types(&self) -> TokenStream2 {
-        let ty = &*self.ast.self_ty;
-        let (impl_generics, ty_generics, where_clause) = self.ast.generics.split_for_impl();
+        // let ty = &*self.ast.self_ty;
+        let (_impl_generics, ty_generics, where_clause) = self.ast.generics.split_for_impl();
 
         let requests = self.methods.iter().map(|Method { ident_cap, args_ty, .. }| {
             quote! { #ident_cap(#(#args_ty),*) }

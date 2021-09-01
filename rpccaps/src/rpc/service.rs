@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use futures::prelude::*;
-use tokio::io::{AsyncRead,AsyncWrite};
-use tokio_util::codec::{Decoder,Encoder,FramedRead,FramedWrite};
+use futures::io::{AsyncRead,AsyncWrite};
+use tokio_util::codec::{Decoder,Encoder};
 
+use super::codec::Framed;
 use super::transport::Transport;
 
 
@@ -53,9 +54,8 @@ pub trait Service: Send+Sync+Unpin
               E::Error: Send+Unpin,
               D: Decoder<Item=Self::Request>+Send+Unpin,
     {
-        let stream = FramedRead::new(receiver, decoder)
-            .filter_map(|req| { future::ready(req.ok()) });
-        let sink = FramedWrite::new(sender, encoder);
+        let stream = Framed::new(receiver, decoder);
+        let sink = Framed::new(sender, encoder);
         self.serve(Transport::new(sink,stream)).await
     }
 }

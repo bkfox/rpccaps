@@ -1,28 +1,22 @@
 use std::{
-    fs::File,
-    io::Read,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
-    sync::{Arc,RwLock},
-    pin::Pin
+    net::SocketAddr,
+    sync::Arc,
 };
 
 
 use futures::prelude::*;
-use tokio::{
-    io::{AsyncRead,AsyncWrite},
-    runtime::Runtime
-};
+use tokio::runtime::Runtime;
 use serde::{Deserialize,Serialize};
 
 use rcgen::{self, generate_simple_self_signed};
 use quinn::{self, Endpoint, ServerConfigBuilder, ClientConfigBuilder};
 
+use super::Error;
 use super::codec::BincodeCodec;
-use super::dispatch::{Dispatch,Error,HandlerFn};
+use super::dispatch::Dispatch;
 
 
 
-#[derive(Serialize,Deserialize)]
 struct ServerConfig {
     dispatch_max: Option<u32>,
     cert: Option<rcgen::Certificate>,
@@ -32,7 +26,7 @@ struct ServerConfig {
 
 
 
-pub type IncomingStreamItem = (quinn::SendStream, quinn::RecvStream);
+pub type IncomingStreamItem = (quinn::SendStream, quinn::RecvStream, quinn::Connection);
 
 /// Server class handling dispatching to services from incoming transport stream.
 /// It uses Bincode for messages de-serialization and Quic for communication.
@@ -59,7 +53,7 @@ impl ServerConfig {
         if self.cert.is_none() {
             let cert = generate_simple_self_signed(self.cert_subject_names.clone())
                             .or(Err(()))?;
-            self.cert = cert.ok();
+            self.cert = Some(cert);
         }
 
         Ok(())
@@ -68,7 +62,7 @@ impl ServerConfig {
 
 
 impl<Id> Server<Id>
-    where for<'de> Id: 'static+std::cmp::Ord+Send+Sync+Clone+Deserialize<'de>,
+    where for<'de> Id: 'static+std::cmp::Ord+Send+Sync+Deserialize<'de>+Unpin
 {
     /// Create new server.
     pub fn new(config: ServerConfig) -> Self {
@@ -87,7 +81,7 @@ impl<Id> Server<Id>
 
         let mut endpoint = Endpoint::builder();
         let mut server_config = ServerConfigBuilder::default();
-        let cert = self.config.cert.unwrap();
+        let cert = self.config.cert.as_ref().unwrap();
         let key = quinn::PrivateKey::from_der(&cert.serialize_private_key_der()).unwrap();
         let cert = quinn::Certificate::from_der(&cert.serialize_der().unwrap()).unwrap();
         let cert_chain = quinn::CertificateChain::from_certs(vec![cert.clone()]);
@@ -102,25 +96,25 @@ impl<Id> Server<Id>
         endpoint.bind(address).or(Err(()))
     }
 
-    async fn run(&mut self, runtime: &Arc<Runtime>, address: &SocketAddr) -> Result<(),()> {
+    async fn run(&mut self, runtime: Arc<Runtime>, address: &SocketAddr) -> Result<(),()> {
         let (mut endpoint, mut incoming) = self.endpoint(address)?;
 
         while let Some(connecting) = incoming.next().await {
             let new_conn = connecting.await.unwrap();
-            let (dispatch, runtime) = (self.dispatch.clone(), runtime.clone());
-            let connection = new_conn.connection;
+            let (dispatch, runtime_) = (self.dispatch.clone(), runtime.clone());
+            let (connection, mut streams) = (new_conn.connection, new_conn.bi_streams);
 
-            let handle = new_conn.bi_streams
-                .take_while(|x| future::ready(x.is_ok()))
-                .for_each(async move |stream| {
-                    runtime.spawn(async {
+            runtime.spawn(async move {
+                while let Some(stream) = streams.next().await {
+                    let (dispatch_, connection_) = (dispatch.clone(), connection.clone()) ;
+                    runtime_.spawn(async move {
                         let stream = stream.unwrap();
-                        let data = (stream.0, stream.1, connection.clone());
-                        dispatch.dispatch_stream::<BincodeCodec<Id>>(data).await
-                                .or(Err(()))
+                        let data = (stream.0, stream.1, connection_);
+                        dispatch_.dispatch_stream::<BincodeCodec<Id>>(data).await
+                                 .or(Err(()))
                     });
-                });
-            runtime.spawn(handle);
+                }
+            });
         }
         Ok(())
     }

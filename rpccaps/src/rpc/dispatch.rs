@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
 use std::sync::{RwLock, atomic::{AtomicU32, Ordering}};
 use std::pin::Pin;
 
@@ -6,11 +7,12 @@ use futures::prelude::*;
 use serde::{Deserialize,Serialize};
 use futures::io::{AsyncRead,AsyncWrite};
 
-use super::codec::{BincodeCodec,Decoder,FramedRead};
+use super::Error;
+use super::codec::{BincodeCodec,Decoder,Framed};
 use super::service::Service;
 
 
-pub type HandlerFn<D> = Box<dyn Send+Sync+Unpin+Fn(D) -> Pin<Box<dyn Future<Output=()>>>>;
+pub type HandlerFn<D> = Box<dyn Send+Sync+Unpin+Fn(D) -> Pin<Box<dyn Future<Output=()>+Send>>>;
 
 /// Dispatch handler information
 pub struct Handler<D> {
@@ -21,16 +23,6 @@ pub struct Handler<D> {
 }
 
 
-#[derive(PartialEq,Debug)]
-pub enum Error {
-    Internal,
-    KeyError,
-    TooManyTasks,
-    Codec,
-    File,
-}
-
-
 /// Data dispatch to handler by Id, able to spawn tasks.
 pub struct Dispatch<Id,D>
     where Id: std::cmp::Ord
@@ -38,6 +30,7 @@ pub struct Dispatch<Id,D>
     pub handlers: RwLock<BTreeMap<Id, Handler<D>>>,
     pub count: AtomicU32,
     pub max_count: Option<u32>,
+    phantom: PhantomData<()>,
 }
 
 impl<Id,D> Dispatch<Id,D>
@@ -45,7 +38,9 @@ impl<Id,D> Dispatch<Id,D>
           D: Send+Sync
 {
     pub fn new(max_count: Option<u32>) -> Self {
-        Self { handlers: RwLock::new(BTreeMap::new()), count: AtomicU32::new(0), max_count }
+        Self { handlers: RwLock::new(BTreeMap::new()),
+               count: AtomicU32::new(0),
+               max_count, phantom: PhantomData }
     }
 
     pub fn add(&self, id: Id, func: HandlerFn<D>, once: bool) -> Result<(), Error>
@@ -98,41 +93,37 @@ impl<Id,D> Dispatch<Id,D>
 }
 
 
-
-type ServiceBuilder<S> = Box<dyn Send+Sync+Unpin+Fn() -> S>;
-
 /// Implement Dispatch with ``(AsyncWrite, AsyncRead)`` as ``Data``.
-impl<Id,S,R,D> Dispatch<Id,(S,R,D)>
+impl<'a,Id,S,R,D> Dispatch<Id,(S,R,D)>
     where for<'de> Id: std::cmp::Ord+Send+Sync+Deserialize<'de>,
-          S: 'static+AsyncWrite+Sync+Send+Unpin,
-          R: 'static+AsyncRead+Sync+Send+Unpin,
-          D: Sync+Send,
+          S: 'static+AsyncWrite+Unpin+Sync+Send,
+          R: 'static+AsyncRead+Unpin+Sync+Send,
+          D: 'a+Sync+Send,
 {
     /// Register a service using factory function.
     /// FIXME: generic codec
-    pub fn add_builder<Sv>(&self, id: Id, builder: ServiceBuilder<Sv>, once: bool)
+    pub fn add_builder<F,Sv>(&self, id: Id, builder: Box<F>, once: bool)
             -> Result<(), Error>
-        where Sv: 'static+Service,
+        where F: 'static+Send+Sync+Unpin+Fn(D)->Sv,
+              Sv: 'static+Send+Sync+Service,
               for <'de> Sv::Request: Deserialize<'de>, Sv::Response: Serialize
     {
-        let handler: HandlerFn<(S,R,D)> = Box::new(move |(sender, receiver, data)| {
-            let encoder = BincodeCodec::new();
-            let decoder = BincodeCodec::new();
+        let handler = Box::new(move |(sender, receiver, data)| {
+            let (encoder, decoder) = (BincodeCodec::new(), BincodeCodec::new());
             builder(data).serve_stream((sender, receiver), encoder, decoder)
         });
         self.add(id, handler, once)
     }
 
-
     /// Dispatch ``(sender, receiver)`` to service. Uses provided
     /// codec ``C`` to decode handler's Id.
     pub async fn dispatch_stream<C>(&self, (sender, receiver, data): (S,R,D))
             -> Result<(), Error>
-        where C: Default+Decoder<Item=Id>
+        where C: Default+Decoder<Item=Id>+Unpin
     {
-        let mut codec = FramedRead::new(receiver, C::default());
+        let mut codec = Framed::new(receiver, C::default());
         let id = match codec.next().await {
-            Some(Ok(id)) => id,
+            Some(id) => id,
             _ => return Err(Error::Codec),
         };
 

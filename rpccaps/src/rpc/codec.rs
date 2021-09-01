@@ -8,60 +8,136 @@ use futures::task::{Context,Poll};
 
 use bincode;
 use serde::{Deserialize,Serialize};
-pub use tokio_util::codec::{Decoder,Encoder,FramedWrite};
+pub use tokio_util::codec::{Decoder,Encoder};
+
+use super::Error;
 
 
-
-/// FramedRead compatible with futures::io's AsyncRead/Write
-pub struct FramedRead<R,C>
+/// FramedRead/Write compatible with futures::io's AsyncRead/Write
+pub struct Framed<T,C>
 {
-    reader: R,
-    decoder: C,
+    inner: T,
+    codec: C,
+    chunk_size: usize,
     buffer: BytesMut,
 }
 
-impl<R,C> FramedRead<R,C>
+
+impl<T,C> Framed<T,C>
 {
-    pub fn new(reader: R, decoder: C) -> Self {
-        Self::with_capacity(reader, decoder, 128)
+    pub fn new(inner: T, codec: C) -> Self {
+        Self::with_capacity(inner, codec, 128)
     }
 
-    pub fn with_capacity(&self, reader: R, decoder: C, capacity: usize) -> Self {
+    pub fn with_capacity(inner: T, codec: C, capacity: usize) -> Self {
         let mut buffer = BytesMut::with_capacity(capacity);
-        Self { reader, decoder, buffer: BytesMut::new() }
+        Self { inner, codec, chunk_size: capacity, buffer: BytesMut::new() }
     }
 
     pub fn capacity(&self) -> usize {
-        self.buffer.capacity
+        self.buffer.capacity()
     }
 
-    pub fn into_inner(self) -> R {
-        self.reader
+    pub fn into_inner(self) -> T {
+        self.inner
     }
 }
 
-impl<R,C> Stream for FramedRead<R,C>
-    where R: AsyncRead,
+impl<T,C> Stream for Framed<T,C>
+    where T: AsyncRead+Unpin,
           C: Decoder+Unpin,
 {
     type Item = C::Item;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>>
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>>
     {
         let mut this = self.as_mut();
-        this.buffer.resize(this.buffer.capacity);
+        let buffer_size = this.buffer.len();
 
-        match Pin::new(&mut this.reader).poll_read(cx, &this.buffer) {
-            Poll::Ready(Ok(size)) => match this.codec.decode(&this.buffer[..size]) {
-                Ok(Some(item)) => Poll::Ready(Some(item)),
-                Ok(None) => Poll::Pending,
-                Err(_) => Poll::Ready(None),
+        if this.buffer.len() + this.chunk_size < this.buffer.capacity() {
+            let len = this.buffer.len() + this.chunk_size;
+            this.buffer.resize(len, 0);
+        }
+
+        let mut buffer = BytesMut::new();
+        std::mem::swap(&mut buffer, &mut this.buffer);
+
+        let poll = Pin::new(&mut this.inner)
+                        .poll_read(cx, &mut buffer[buffer_size..]);
+        let r = match poll {
+            Poll::Ready(Ok(size)) => {
+                buffer.resize(buffer_size+size, 0);
+                match this.codec.decode(&mut buffer) {
+                    Ok(Some(item)) => Poll::Ready(Some(item)),
+                    Ok(None) => Poll::Pending,
+                    Err(_) => Poll::Ready(None),
+                }
             },
             Poll::Ready(Err(_)) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        };
+
+        std::mem::swap(&mut buffer, &mut this.buffer);
+        r
+    }
+}
+
+impl<T,C,I> Sink<I> for Framed<T,C>
+    where T: AsyncWrite+Unpin,
+          C: Encoder<I>+Unpin,
+{
+    type Error = Error;
+
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>)
+        -> Poll<Result<(), Self::Error>>
+    {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: I)
+        -> Result<(), Self::Error>
+    {
+        let mut this = self.as_mut();
+        let mut buffer = BytesMut::new();
+        std::mem::swap(&mut buffer, &mut this.buffer);
+
+        let r = this.codec.encode(item, &mut buffer).or(Err(Error::Codec));
+        std::mem::swap(&mut buffer, &mut this.buffer);
+        r
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>)
+        -> Poll<Result<(), Self::Error>>
+    {
+        let mut this = self.as_mut();
+        let mut buffer = BytesMut::new();
+        std::mem::swap(&mut buffer, &mut this.buffer);
+
+        let r = match Pin::new(&mut this.inner).poll_write(cx, &mut buffer) {
+            Poll::Ready(Ok(size)) => match this.buffer.split_at(size).0.len() {
+                x if x > 0 => Poll::Pending,
+                _ => Poll::Ready(Ok(())),
+            },
+            Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Io)),
+            Poll::Pending => Poll::Pending,
+        };
+
+        std::mem::swap(&mut buffer, &mut this.buffer);
+        r
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>)
+        -> Poll<Result<(), Self::Error>>
+    {
+        let mut this = self.as_mut();
+        match Pin::new(&mut this.inner).poll_close(cx) {
+            Poll::Ready(Err(err)) => Poll::Ready(Err(Error::Io)),
+            Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
             Poll::Pending => Poll::Pending,
         }
     }
 }
+
 
 
 
@@ -78,16 +154,16 @@ impl<T> BincodeCodec<T> {
 impl<T> BincodeCodec<T>
     where for <'de> T: Deserialize<'de>
 {
-    pub fn framed_read<R: AsyncRead>(inner: R) -> FramedRead<R,Self> {
-        FramedRead::new(inner, Self::new())
+    pub fn framed_read<R: AsyncRead>(inner: R) -> Framed<R,Self> {
+        Framed::new(inner, Self::new())
     }
 }
 
 impl<T> BincodeCodec<T>
     where T: Serialize
 {
-    pub fn framed_write<R: AsyncWrite>(inner: R) -> FramedWrite<R,Self> {
-        FramedWrite::new(inner, Self::new())
+    pub fn framed_write<R: AsyncWrite>(inner: R) -> Framed<R,Self> {
+        Framed::new(inner, Self::new())
     }
 }
 
