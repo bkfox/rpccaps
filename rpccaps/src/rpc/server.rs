@@ -25,8 +25,15 @@ struct ServerConfig {
 }
 
 
+pub struct ServerContext
+{
+    pub connection: quinn::Connection,
+    pub endpoint: quinn::Endpoint,
+}
 
-pub type IncomingStreamItem = (quinn::SendStream, quinn::RecvStream, quinn::Connection);
+
+
+pub type IncomingStreamItem = (quinn::SendStream, quinn::RecvStream, Arc<ServerContext>);
 
 /// Server class handling dispatching to services from incoming transport stream.
 /// It uses Bincode for messages de-serialization and Quic for communication.
@@ -97,19 +104,22 @@ impl<Id> Server<Id>
     }
 
     async fn run(&mut self, runtime: Arc<Runtime>, address: &SocketAddr) -> Result<(),()> {
-        let (mut endpoint, mut incoming) = self.endpoint(address)?;
-
+        let (endpoint, mut incoming) = self.endpoint(address)?;
         while let Some(connecting) = incoming.next().await {
             let new_conn = connecting.await.unwrap();
             let (dispatch, runtime_) = (self.dispatch.clone(), runtime.clone());
-            let (connection, mut streams) = (new_conn.connection, new_conn.bi_streams);
+            let mut streams = new_conn.bi_streams;
+            let context = Arc::new(ServerContext{
+                connection: new_conn.connection,
+                endpoint: endpoint.clone()
+            });
 
             runtime.spawn(async move {
                 while let Some(stream) = streams.next().await {
-                    let (dispatch_, connection_) = (dispatch.clone(), connection.clone()) ;
+                    let (dispatch_, context) = (dispatch.clone(), context.clone()) ;
                     runtime_.spawn(async move {
                         let stream = stream.unwrap();
-                        let data = (stream.0, stream.1, connection_);
+                        let data = (stream.0, stream.1, context);
                         dispatch_.dispatch_stream::<BincodeCodec<Id>>(data).await
                                  .or(Err(()))
                     });
@@ -121,25 +131,6 @@ impl<Id> Server<Id>
 
     // TODO: run(), stop()
 }
-
-
-/*#[cfg(feature="network")]
-pub mod quic {
-    use quinn::{self, Certificate, Connection, ConnectionError, ReadError, WriteError};
-    use rand::{self, RngCore};
-    use tokio::runtime::Builder;
-
-    pub struct QuicServer<Id> {
-        pub connection: Connection,
-        cert_secret: Vec<u8>,
-    }
-
-    impl<Id> QuicServer<Id> {
-        fn configure_listener(&self) -> (quinn::ServerConfig, Vec<u8>) {
-            
-        }
-    }
-}*/
 
 
 #[cfg(test)]

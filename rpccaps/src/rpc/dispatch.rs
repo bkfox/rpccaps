@@ -94,11 +94,11 @@ impl<Id,D> Dispatch<Id,D>
 
 
 /// Implement Dispatch with ``(AsyncWrite, AsyncRead)`` as ``Data``.
-impl<'a,Id,S,R,D> Dispatch<Id,(S,R,D)>
+impl<Id,S,R,D> Dispatch<Id,(S,R,D)>
     where for<'de> Id: std::cmp::Ord+Send+Sync+Deserialize<'de>,
           S: 'static+AsyncWrite+Unpin+Sync+Send,
           R: 'static+AsyncRead+Unpin+Sync+Send,
-          D: 'a+Sync+Send,
+          D: 'static+Sync+Send,
 {
     /// Register a service using factory function.
     /// FIXME: generic codec
