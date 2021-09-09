@@ -1,5 +1,7 @@
-use std::marker::PhantomData;
-use std::pin::Pin;
+use std::{
+	marker::PhantomData,
+    pin::Pin,
+};
 
 use bytes::BytesMut;
 use futures::io::{AsyncRead,AsyncWrite};
@@ -10,7 +12,7 @@ use bincode;
 use serde::{Deserialize,Serialize};
 pub use tokio_util::codec::{Decoder,Encoder};
 
-use super::Error;
+use super::{ErrorKind,Error};
 
 
 /// FramedRead/Write compatible with futures::io's AsyncRead/Write
@@ -101,7 +103,8 @@ impl<T,C,I> Sink<I> for Framed<T,C>
         let mut buffer = BytesMut::new();
         std::mem::swap(&mut buffer, &mut this.buffer);
 
-        let r = this.codec.encode(item, &mut buffer).or(Err(Error::Codec));
+        let r = this.codec.encode(item, &mut buffer)
+            		.or_else(|_| ErrorKind::Codec.err("encoding error"));
         std::mem::swap(&mut buffer, &mut this.buffer);
         r
     }
@@ -118,7 +121,7 @@ impl<T,C,I> Sink<I> for Framed<T,C>
                 x if x > 0 => Poll::Pending,
                 _ => Poll::Ready(Ok(())),
             },
-            Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Io)),
+            Poll::Ready(Err(err)) => Poll::Ready(ErrorKind::IO.err(err.to_string())),
             Poll::Pending => Poll::Pending,
         };
 
@@ -131,7 +134,7 @@ impl<T,C,I> Sink<I> for Framed<T,C>
     {
         let mut this = self.as_mut();
         match Pin::new(&mut this.inner).poll_close(cx) {
-            Poll::Ready(Err(err)) => Poll::Ready(Err(Error::Io)),
+            Poll::Ready(Err(err)) => Poll::Ready(ErrorKind::IO.err(err.to_string())),
             Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
             Poll::Pending => Poll::Pending,
         }

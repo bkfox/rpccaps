@@ -7,7 +7,7 @@ use futures::prelude::*;
 use serde::{Deserialize,Serialize};
 use futures::io::{AsyncRead,AsyncWrite};
 
-use super::Error;
+use super::{Error, ErrorKind,Result};
 use super::codec::{BincodeCodec,Decoder,Framed};
 use super::service::Service;
 
@@ -43,15 +43,15 @@ impl<Id,D> Dispatch<Id,D>
                max_count, phantom: PhantomData }
     }
 
-    pub fn add(&self, id: Id, func: HandlerFn<D>, once: bool) -> Result<(), Error>
+    pub fn add(&self, id: Id, func: HandlerFn<D>, once: bool) -> Result<()>
     {
         let handler = Handler { func, once };
         match self.handlers.write() {
             Ok(mut handlers) => match handlers.insert(id, handler) {
                 None => Ok(()),
-                Some(_) => Err(Error::KeyError),
+                Some(_) => ErrorKind::NotFound.err("handler already exists for this id"),
             },
-            _ => Err(Error::Internal),
+            _ => ErrorKind::Internal.err("can not lock-write handlers"),
         }
     }
 
@@ -59,10 +59,10 @@ impl<Id,D> Dispatch<Id,D>
         self.handlers.write().unwrap().remove(&id);
     }
 
-    pub async fn dispatch(&self, id: Id, data: D) -> Result<(), Error> {
+    pub async fn dispatch(&self, id: Id, data: D) -> Result<()> {
         if let Some(max_count) = self.max_count {
             if self.count.load(Ordering::Relaxed) >= max_count {
-                return Err(Error::TooManyTasks);
+                return ErrorKind::LimitReached.err("maximum tasks count reached")
             }
         }
         self.count.fetch_add(1, Ordering::Relaxed);
@@ -73,10 +73,10 @@ impl<Id,D> Dispatch<Id,D>
         let (fut, once) = {
             match self.handlers.read() {
                 Ok(handlers) => match handlers.get(&id) {
-                    None => return Err(Error::KeyError),
+                    None => return ErrorKind::NotFound.err("handler not found"),
                     Some(handler) => ((handler.func)(data), handler.once)
                 },
-                Err(_) => return Err(Error::Internal),
+                Err(_) => return ErrorKind::Internal.err("can not read handlers"),
             }
         };
 
@@ -103,7 +103,7 @@ impl<Id,S,R,D> Dispatch<Id,(S,R,D)>
     /// Register a service using factory function.
     /// FIXME: generic codec
     pub fn add_builder<F,Sv>(&self, id: Id, builder: Box<F>, once: bool)
-            -> Result<(), Error>
+            -> Result<()>
         where F: 'static+Send+Sync+Unpin+Fn(D)->Sv,
               Sv: 'static+Send+Sync+Service,
               for <'de> Sv::Request: Deserialize<'de>, Sv::Response: Serialize
@@ -118,13 +118,13 @@ impl<Id,S,R,D> Dispatch<Id,(S,R,D)>
     /// Dispatch ``(sender, receiver)`` to service. Uses provided
     /// codec ``C`` to decode handler's Id.
     pub async fn dispatch_stream<C>(&self, (sender, receiver, data): (S,R,D))
-            -> Result<(), Error>
+            -> Result<()>
         where C: Default+Decoder<Item=Id>+Unpin
     {
         let mut codec = Framed::new(receiver, C::default());
         let id = match codec.next().await {
             Some(id) => id,
-            _ => return Err(Error::Codec),
+            _ => return ErrorKind::InvalidData.err("can not read/decode handler's id"),
         };
 
         let receiver = codec.into_inner();
@@ -218,8 +218,8 @@ pub mod tests {
             let test = TestDispatch::new(None);
             test.dispatch(&"add_once",(2,3)).await.unwrap();
             assert_eq!(test.result(), 5);
-            assert_eq!(test.dispatch(&"add_once",(2,3)).await.unwrap_err(),
-                       Error::KeyError);
+            assert_eq!(test.dispatch(&"add_once",(2,3)).await.unwrap_err().kind(),
+                       ErrorKind::KeyError);
         })
     }
 
