@@ -60,6 +60,7 @@ pub struct Authorization<Sign>
     pub capability: Capability,
     #[serde(with="bytes")]
     pub subject: Sign::Verifier,
+    // TODO: timeout, FIXME: capability namespaces
 }
 
 

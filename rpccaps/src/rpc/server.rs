@@ -1,7 +1,5 @@
 use std::{
-    fs,  io::ErrorKind as IoErrorKind,
     net::SocketAddr,
-    path::PathBuf,
     sync::Arc,
 };
 
@@ -10,195 +8,138 @@ use futures::prelude::*;
 use tokio::runtime::Runtime;
 use serde::{Deserialize,Serialize};
 
-use rcgen::{self, generate_simple_self_signed};
-use quinn::{self, Endpoint, ServerConfigBuilder, ClientConfigBuilder};
-
-use super::{ErrorKind, Result};
+use crate::{ErrorKind, Result};
 use super::codec::BincodeCodec;
 use super::dispatch::Dispatch;
+use super::config::ServerConfig;
 
 
-pub struct ServerConfig {
-    /// Max concurrent dispatch
-    pub dispatch_max: Option<u32>,
-    /// Certificate and private key's file path
-    pub cert: Option<(PathBuf, PathBuf)>,
-    /// Certificate's subjects' names
-    pub cert_subjects: Vec<String>,
+
+/// Trait defining server context passed down to services at dispatch.
+pub trait ServerContext {
+    /// Create new server context with provided endpoint and connection
+    fn server_context(endpoint: quinn::Endpoint, connection: quinn::Connection) -> Self;
 }
 
-
-pub struct ServerContext
+/// Default server context passed down to server.
+pub struct DefaultServerContext
 {
-    pub connection: quinn::Connection,
     pub endpoint: quinn::Endpoint,
+    pub connection: quinn::Connection,
 }
 
 
+pub type IncomingStream<C> = (quinn::SendStream, quinn::RecvStream, Arc<C>);
 
-pub type IncomingStreamItem = (quinn::SendStream, quinn::RecvStream, Arc<ServerContext>);
 
-/// Server class handling dispatching to services from incoming transport stream.
-/// It uses Bincode for messages de-serialization and Quic for communication.
-struct Server<Id>
+/// Server dispatching incoming requests to services, and using Bincode
+/// for messages' de-serialization, and QUIC for communication.
+///
+/// ```
+/// let config = ServerConfig::new()
+/// let mut server = Server::<u64, DefaultServerContext>::new(config);
+/// // init handlers
+/// let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 6677);
+/// let (endpoint, mut incomings) = server.endpoint(&address).unwrap();
+/// let fut = server.dispatch_incoming(runtime, endpoint, incoming);
+/// // spawn fut
+/// ```
+/// 
+struct Server<Id, C>
     where Id: std::cmp::Ord,
+          C: ServerContext
 {
-    pub dispatch: Arc<Dispatch<Id,IncomingStreamItem>>,
-    pub endpoint: Option<quinn::Endpoint>,
-    config: ServerConfig,
+    /// Services dispatch.
+    pub dispatch: Arc<Dispatch<Id,IncomingStream<C>>>,
+    /// Server configuration
+    pub config: ServerConfig,
 }
 
 
-
-impl ServerConfig {
-    pub fn new() -> Self {
-		Self {
-    		dispatch_max: None,
-    		cert: None,
-			cert_subjects: vec![String::from("localhost")],
-		}
+impl ServerContext for DefaultServerContext {
+    fn server_context(endpoint: quinn::Endpoint, connection: quinn::Connection) -> Self {
+        Self { endpoint, connection }
     }
-
-	/// Read from files (see `self.cert`) or generate certificate and private key and return it.
-	/// If `self.cert` is provided, save generated certificate and private key.
-    pub fn get_cert(&self) -> Result<(quinn::CertificateChain, quinn::PrivateKey)> {
-        if let Some((ref cert_path, ref key_path)) = self.cert {
-            match self.load_cert(cert_path, key_path) {
-				Err(err) if err.kind() == ErrorKind::NotFound => {},
-				x => return x
-            }
-        }
-        self.generate_cert()
-    }
-
-    fn load_cert(&self, cert_path: &PathBuf, key_path: &PathBuf)
-        -> Result<(quinn::CertificateChain, quinn::PrivateKey)>
-    {
-        match (fs::read(cert_path), fs::read(key_path)) {
-			(Ok(cert), Ok(key)) => {
-				let cert_err = ErrorKind::InvalidData.err("invalid cert data");
-				let cert_chain_err = ErrorKind::InvalidData.err("invalid cert chain data");
-				let key_err = ErrorKind::InvalidData.err("invalid key data");
-				let key = match key_path.extension() {
-					Some(x) if x == "der" => quinn::PrivateKey::from_der(&key).or(key_err)?,
-					_ => quinn::PrivateKey::from_pem(&key).or(key_err)?,
-				};
-				let cert = match cert_path.extension() {
-					Some(x) if x == "der" => quinn::CertificateChain::from_certs(
-    					Some(quinn::Certificate::from_der(&cert).or(cert_err)?),
-					),
-					_ => quinn::CertificateChain::from_pem(&cert).or(cert_chain_err)?,
-				};
-				Ok((cert, key))
-			},
-			(Err(err), _) if err.kind() == IoErrorKind::NotFound =>
-    			ErrorKind::NotFound.err("cert file not found"),
-			(_, Err(err)) if err.kind() == IoErrorKind::NotFound =>
-    			ErrorKind::NotFound.err("private key file not found"),
-			(Err(err), _) => return ErrorKind::File.err(err.to_string()),
-			(_, Err(err)) => return ErrorKind::File.err(err.to_string()),
-        }
-    }
-
-    fn generate_cert(&self) -> Result<(quinn::CertificateChain, quinn::PrivateKey)>
-    {
-		// generate new certificate
-		let cert = generate_simple_self_signed(self.cert_subjects.clone())
-			.or_else(|_| ErrorKind::Certificate.err("can not generate certificate"))?;
-        let (cert, key) = match cert.serialize_der() {
-        	Ok(cert_) => (cert_, cert.serialize_private_key_der()),
-        	_ => return ErrorKind::Certificate.err("can not serialize generated certificate"),
-        };
-        if let Some((ref cert_path, ref key_path)) = self.cert {
-			// TODO: write cert
-        }
-
-		let cert = quinn::CertificateChain::from_certs(vec![
-    		quinn::Certificate::from_der(&cert).unwrap()
-        ]);
-		let key = quinn::PrivateKey::from_der(&key).unwrap();
-		Ok((cert, key))
-    }}
+}
 
 
-impl<Id> Server<Id>
-    where for<'de> Id: 'static+std::cmp::Ord+Send+Sync+Deserialize<'de>+Unpin
+impl<Id, C> Server<Id, C>
+    where for<'de> Id: 'static+std::cmp::Ord+Send+Sync+Deserialize<'de>+Unpin,
+                   C: 'static+ServerContext+Send+Sync
 {
     /// Create new server.
     pub fn new(config: ServerConfig) -> Self {
         Self {
-            dispatch: Arc::new(Dispatch::new(config.dispatch_max)),
-            endpoint: None,
+            // max dispatch is handled by ServerConfig::concurrent_streams
+            dispatch: Arc::new(Dispatch::new(None)),
             config: config,
         }
     }
 
-    /// Create endpoint binding to provided address.
-    pub fn endpoint(&mut self, address: &SocketAddr)
-            -> Result<(quinn::Endpoint, quinn::Incoming)>
+    /// Listen at provided address, dispatching services on provided runtime.
+    pub async fn listen(&mut self, address: SocketAddr, runtime: Arc<Runtime>)
+        -> Result<()>
     {
-        let mut endpoint = Endpoint::builder();
-        let mut server_config = ServerConfigBuilder::default();
-		let (cert, key) = self.config.get_cert()?;
-        server_config.certificate(cert, key).unwrap();
-        endpoint.listen(server_config.build());
-
-        let mut client_config = ClientConfigBuilder::default();
-        client_config.add_certificate_authority(cert).unwrap();
-        endpoint.default_client_config(client_config.build());
-
-        endpoint.bind(address)
-            	.or_else(|err| ErrorKind::IO.err(err.to_string()))
+        let (endpoint, incoming) = self.get_endpoint(address)?;
+        self.dispatch_incoming(runtime, endpoint, incoming).await
     }
 
-    async fn run(&mut self, runtime: Arc<Runtime>, address: &SocketAddr) -> Result<()> {
-        let (endpoint, mut incoming) = self.endpoint(address)?;
-		self.endpoint = Some(endpoint.clone());
-        
-        while let Some(conn) = incoming.next().await {
-            let quinn::NewConnection { connection, mut bi_streams, .. } = conn.await.unwrap();
-            let (dispatch, runtime_) = (self.dispatch.clone(), runtime.clone());
-            let context = Arc::new(ServerContext{
-                connection: connection,
-                endpoint: endpoint.clone()
-            });
+    /// Return new endpoint binding to provided address.
+    pub fn get_endpoint(&mut self, address: SocketAddr)
+        -> Result<(quinn::Endpoint, quinn::Incoming)>
+    {
+        let server_config = self.config.get_server_config()?;
+        quinn::Endpoint::server(server_config, address)
+                .or(ErrorKind::Endpoint.err("can't init endpoint"))
+    }
 
-            runtime.spawn(async move {
-                while let Some(stream) = bi_streams.next().await {
-                    let (dispatch_, context) = (dispatch.clone(), context.clone()) ;
-                    runtime_.spawn(async move {
-                        let stream = stream.unwrap();
-                        let data = (stream.0, stream.1, context);
-                        dispatch_.dispatch_stream::<BincodeCodec<Id>>(data).await
-                    });
-                }
-            });
+    /// Listen to incoming connections and dispatch them to services
+    pub async fn dispatch_incoming(&mut self, runtime: Arc<Runtime>,
+                        endpoint: quinn::Endpoint, mut incoming: quinn::Incoming)
+        -> Result<()>
+    {
+        while let Some(conn) = incoming.next().await {
+            let quinn::NewConnection {connection, bi_streams, .. } = conn.await.unwrap();
+            let context = C::server_context(endpoint.clone(), connection);
+            self.dispatch_streams(runtime.clone(), context, bi_streams);
         }
         Ok(())
     }
 
-    async fn close(&mut self, error_code: u32, reason: &[u8]) {
-		if let Some(ref endpoint) = self.endpoint {
-    		endpoint.close(error_code.into(), reason);
-    		self.endpoint = None;
-		}
+    /// Dispatch incoming bi_streams through the services.
+    fn dispatch_streams(&self, runtime: Arc<Runtime>, context: C,
+                            mut bi_streams: quinn::IncomingBiStreams)
+    {
+        let dispatch = self.dispatch.clone();
+        let context = Arc::new(context);
+        let runtime_ = runtime.clone();
+
+        runtime.spawn(async move {
+            while let Some(stream) = bi_streams.next().await {
+                let (dispatch_, context) = (dispatch.clone(), context.clone()) ;
+                runtime_.spawn(async move {
+                    let stream = stream.unwrap();
+                    let data = (stream.0, stream.1, context);
+                    dispatch_.dispatch_stream::<BincodeCodec<Id>>(data).await
+                });
+            }
+        });
     }
 }
 
 
 #[cfg(test)]
 pub mod tests {
-	use super::*;
-	use std::{
-		net::{Ipv4Addr}
-	};
+    use super::*;
+    use std::{
+        net::{Ipv4Addr}
+    };
 
     #[test]
     fn test_server() {
         let server = Server::new(ServerConfig::new());
-		
+        
     }
-
 }
 
 

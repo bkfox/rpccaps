@@ -7,7 +7,7 @@ use futures::prelude::*;
 use serde::{Deserialize,Serialize};
 use futures::io::{AsyncRead,AsyncWrite};
 
-use super::{Error, ErrorKind,Result};
+use crate::{ErrorKind, Result};
 use super::codec::{BincodeCodec,Decoder,Framed};
 use super::service::Service;
 
@@ -43,6 +43,8 @@ impl<Id,D> Dispatch<Id,D>
                max_count, phantom: PhantomData }
     }
 
+    /// Register handler at id. If ``once`` is true, then handler is called once
+    /// then removed.
     pub fn add(&self, id: Id, func: HandlerFn<D>, once: bool) -> Result<()>
     {
         let handler = Handler { func, once };
@@ -55,10 +57,12 @@ impl<Id,D> Dispatch<Id,D>
         }
     }
 
+    /// Remove handler by id.
     pub fn remove(&self, id: &Id) {
         self.handlers.write().unwrap().remove(&id);
     }
 
+    /// Call dispatch registered at id with provided data.
     pub async fn dispatch(&self, id: Id, data: D) -> Result<()> {
         if let Some(max_count) = self.max_count {
             if self.count.load(Ordering::Relaxed) >= max_count {
@@ -93,7 +97,7 @@ impl<Id,D> Dispatch<Id,D>
 }
 
 
-/// Implement Dispatch with ``(AsyncWrite, AsyncRead)`` as ``Data``.
+/// Implement Dispatch with ``(AsyncWrite, AsyncRead, data)`` as ``Data``.
 impl<Id,S,R,D> Dispatch<Id,(S,R,D)>
     where for<'de> Id: std::cmp::Ord+Send+Sync+Deserialize<'de>,
           S: 'static+AsyncWrite+Unpin+Sync+Send,
@@ -115,7 +119,7 @@ impl<Id,S,R,D> Dispatch<Id,(S,R,D)>
         self.add(id, handler, once)
     }
 
-    /// Dispatch ``(sender, receiver)`` to service. Uses provided
+    /// Dispatch ``(sender, receiver, data)`` to service. Uses provided
     /// codec ``C`` to decode handler's Id.
     pub async fn dispatch_stream<C>(&self, (sender, receiver, data): (S,R,D))
             -> Result<()>

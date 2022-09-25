@@ -12,7 +12,7 @@ use bincode;
 use serde::{Deserialize,Serialize};
 pub use tokio_util::codec::{Decoder,Encoder};
 
-use super::{ErrorKind,Error};
+use crate::{ErrorKind,Error};
 
 
 /// FramedRead/Write compatible with futures::io's AsyncRead/Write
