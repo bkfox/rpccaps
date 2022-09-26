@@ -41,24 +41,22 @@ impl<'a> Service<'a> {
         (quote!{
             #ast
 
-            pub mod service {
-                use super::*;
-                use std::collections::BTreeMap;
-                use std::marker::PhantomData;
-                use futures::prelude::*;
-                use futures::future::{Future,FutureExt,ok,err};
+            use super::*;
+            use std::collections::BTreeMap;
+            use std::marker::PhantomData;
+            use futures::prelude::*;
+            use futures::future::{Future,FutureExt,ok,err};
 
-                use async_trait::async_trait;
-                use serde::{Deserialize,Serialize};
+            use async_trait::async_trait;
+            use serde::{Deserialize,Serialize};
 
-                use rpccaps::data::Capability;
-                use rpccaps::rpc::service::Service;
-                use rpccaps::data::{signature as sig};
+            use rpccaps::data::Capability;
+            use rpccaps::rpc::service::{Service as RPCService_};
+            use rpccaps::data::{signature as sig};
 
-                #types
-                #service
-                #client
-            }
+            #types
+            #service
+            #client
         }).into()
     }
 
@@ -124,7 +122,7 @@ impl<'a> Service<'a> {
 
         quote! {
             #[async_trait]
-            impl #impl_generics Service for #ty #ty_generics #where_clause {
+            impl #impl_generics RPCService_ for #ty #ty_generics #where_clause {
                 type Request = Request<#ty_generics>;
                 type Response = Response<#ty_generics>;
 
@@ -161,6 +159,7 @@ impl<'a> Service<'a> {
     }
 
     fn client(&self) -> TokenStream2 {
+        let ty = &*self.ast.self_ty;
         let mut generics = self.ast.generics.clone();
         generics.params.push(syn::parse_str::<syn::GenericParam>(r"SinkError: Unpin+Send").unwrap());
         generics.params.push(syn::parse_str::<syn::GenericParam>(&format!(
@@ -177,7 +176,7 @@ impl<'a> Service<'a> {
 
             impl #impl_generics Client #ty_generics #where_clause {
                 pub fn new(transport: Transport) -> Self {
-                    Self { transport: transport }
+                    Self { transport }
                 }
 
                 #(#methods)*

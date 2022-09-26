@@ -5,7 +5,6 @@ use std::{
     time::Duration,
 };
 
-use futures::prelude::*;
 use serde::{Deserialize,Serialize};
 use crate::{
     ErrorKind, Result,
@@ -200,9 +199,7 @@ pub mod tests {
 
     #[test]
     fn test_default_server_config() {
-        let config = ServerConfig::default();
-
-        config.connection_config.create_cert = true;
+        let mut config = ServerConfig::default();
         // TODO: save cert, load cert
 
         let quinn_config = config.get_server_config().unwrap();

@@ -1,7 +1,7 @@
 use std::{ error, fmt, fmt::Display };
 
 
-#[derive(PartialEq,Debug,Clone)]
+#[derive(PartialEq,Debug,Clone,Copy)]
 pub enum ErrorKind {
 	Internal,
 	KeyError,
@@ -45,8 +45,8 @@ impl Error {
 		Self { kind, description: description.into() }
 	}
 
-	pub fn kind(&self) -> &ErrorKind {
-		&self.kind
+	pub fn kind(&self) -> ErrorKind {
+		self.kind
 	}
 }
 

@@ -58,8 +58,23 @@ pub trait Service: Send+Sync+Unpin
         let sink = Framed::new(sender, encoder);
         self.serve(Transport::new(sink,stream)).await
     }
-}
 
+    /// Run service for provided sender/receiver using bincode format.
+    fn client_transport<S,R,E,D>((sender, receiver): (S,R),
+                                 encoder: E, decoder: D)
+        -> Transport<Framed<S,E>, Framed<R,D>>
+        where Self: Sized,
+              S: AsyncWrite+Send+Unpin,
+              R: AsyncRead+Send+Unpin,
+              E: Encoder<Self::Response>+Send+Unpin,
+              E::Error: Send+Unpin,
+              D: Decoder<Item=Self::Request>+Send+Unpin
+    {
+        let stream = Framed::new(receiver, decoder);
+        let sink = Framed::new(sender, encoder);
+        Transport::new(sink,stream)
+    }
+}
 
 
 #[cfg(test)]
@@ -72,34 +87,78 @@ pub mod tests {
     use crate::rpc::transport::MPSCTransport;
     use rpccaps_derive::*;
 
-    pub struct SimpleService {
-        a: u32,
-    }
+    pub mod simple_service {
+        use super::*;
+        
+        pub struct Service {
+            a: u32,
+        }
 
-    impl SimpleService {
-        pub fn new() -> Self {
-            Self { a: 0 }
+        impl Service {
+            pub fn new() -> Self {
+                Self { a: 0 }
+            }
+        }
+
+        #[service]
+        impl Service {
+            pub fn clear(&mut self) {
+                self.a = 0;
+            }
+
+            pub fn add(&mut self, a: u32) -> u32 {
+                self.a += a;
+                self.a
+            }
+
+            async fn sub(&mut self, a: u32) -> u32 {
+                self.a -= a;
+                self.a
+            }
+
+            async fn get(&mut self) -> u32 {
+                self.a
+            }
         }
     }
 
-    #[service]
-    impl SimpleService {
-        pub fn clear(&mut self) {
-            self.a = 0;
+    pub mod simple_service_2 {
+        use super::*;
+        
+        pub struct Service {
+            a: f32,
         }
 
-        pub fn add(&mut self, a: u32) -> u32 {
-            self.a += a;
-            self.a
+        impl Service {
+            pub fn new() -> Self {
+                Self { a: 1.0 }
+            }
         }
 
-        async fn sub(&mut self, a: u32) -> u32 {
-            self.a -= a;
-            self.a
-        }
+        #[service]
+        impl Service {
+            pub fn clear(&mut self) {
+                self.a = 1.0;
+            }
 
-        async fn get(&mut self) -> u32 {
-            self.a
+            pub fn mul(&mut self, a: f32) -> f32 {
+                self.a *= a;
+                self.a
+            }
+
+            async fn div(&mut self, a: f32) -> Result<f32, ()> {
+                match a {
+                    0.0 => Err(()),
+                    x => {
+                        self.a /= x;
+                        Ok(self.a)
+                    }
+                }
+            }
+
+            async fn get(&mut self) -> f32 {
+                self.a
+            }
         }
     }
 
@@ -109,10 +168,10 @@ pub mod tests {
 
     #[test]
     fn test_request_response() {
-        let (server_transport, client_transport) = MPSCTransport::<service::Response, service::Request>::bi(8);
+        let (server_transport, client_transport) = MPSCTransport::<simple_service::Response, simple_service::Request>::bi(8);
 
         let client_fut = async move {
-            let mut client = service::Client::new(client_transport);
+            let mut client = simple_service::Client::new(client_transport);
             assert_eq!(client.add(13).await, Ok(13));
             assert_eq!(client.sub(1).await, Ok(12));
             client.clear().await;
@@ -122,7 +181,7 @@ pub mod tests {
         let server_fut = async move {
             let (s,r) = server_transport.split();
             let transport = Transport::new(s, r);
-            let mut service = SimpleService::new();
+            let mut service = simple_service::Service::new();
             service.serve(transport).await;
         };
 

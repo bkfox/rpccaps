@@ -32,8 +32,8 @@ impl<T,C> Framed<T,C>
     }
 
     pub fn with_capacity(inner: T, codec: C, capacity: usize) -> Self {
-        let mut buffer = BytesMut::with_capacity(capacity);
-        Self { inner, codec, chunk_size: capacity, buffer: BytesMut::new() }
+        let buffer = BytesMut::with_capacity(capacity);
+        Self { inner, codec, chunk_size: capacity, buffer }
     }
 
     pub fn capacity(&self) -> usize {
@@ -140,9 +140,6 @@ impl<T,C,I> Sink<I> for Framed<T,C>
         }
     }
 }
-
-
-
 
 
 /// Implement tokio codec for Bincode.

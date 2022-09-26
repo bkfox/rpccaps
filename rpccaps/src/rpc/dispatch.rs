@@ -223,7 +223,7 @@ pub mod tests {
             test.dispatch(&"add_once",(2,3)).await.unwrap();
             assert_eq!(test.result(), 5);
             assert_eq!(test.dispatch(&"add_once",(2,3)).await.unwrap_err().kind(),
-                       ErrorKind::KeyError);
+                       ErrorKind::NotFound);
         })
     }
 
